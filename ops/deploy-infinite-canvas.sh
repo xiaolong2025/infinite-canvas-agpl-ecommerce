@@ -179,6 +179,28 @@ capture_candidate_logs() {
     docker logs "$container" > "$LOG_DIR/${sha}.log" 2>&1 || true
 }
 
+start_candidate() {
+    local image="$1"
+    local container="$2"
+    local port="$3"
+    local project="$4"
+    if docker compose version >/dev/null 2>&1; then
+        CANVAS_IMAGE="$image" CANVAS_CONTAINER="$container" CANVAS_PORT="$port" \
+            docker compose -p "$project" -f "$COMPOSE_FILE" up -d --no-build app
+        return
+    fi
+
+    log "Docker Compose plugin is unavailable; using equivalent docker run"
+    docker run -d \
+        --name "$container" \
+        --restart unless-stopped \
+        --security-opt no-new-privileges:true \
+        -p "127.0.0.1:${port}:3000" \
+        -e "ANALYTICS_GA4_ID=${ANALYTICS_GA4_ID:-}" \
+        -e "ANALYTICS_BAIDU_ID=${ANALYTICS_BAIDU_ID:-}" \
+        "$image" >/dev/null
+}
+
 deploy() {
     local image="${1:-}"
     local sha="${2:-}"
@@ -212,8 +234,7 @@ deploy() {
         docker rm -f "$candidate_container" >/dev/null
     fi
 
-    CANVAS_IMAGE="$image" CANVAS_CONTAINER="$candidate_container" CANVAS_PORT="$candidate_port" \
-        docker compose -p "$project" -f "$COMPOSE_FILE" up -d --no-build app
+    start_candidate "$image" "$candidate_container" "$candidate_port" "$project"
 
     if ! wait_for_health "$candidate_port"; then
         capture_candidate_logs "$candidate_container" "$sha"
