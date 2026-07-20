@@ -5,6 +5,21 @@ description: 无限画布二次开发版本的服务器部署、自动更新与�
 
 # YigeAI 开发版自动部署方案
 
+## 实际部署状态（2026-07-20）
+
+方案已在 NovixLink 入口机完成首次真实部署，当前状态如下：
+
+- 公网地址：`https://canvas.yigeai.work/`
+- GitHub：`xiaolong2025/infinite-canvas-agpl-ecommerce`
+- 自动发布分支：`develop`
+- 当前线上 Git SHA：`b73638f9439b25caa958f8790e1b47d12108185c`
+- 当前镜像：`ghcr.io/xiaolong2025/infinite-canvas:b73638f9439b25caa958f8790e1b47d12108185c`
+- 当前端口：`127.0.0.1:3101`
+- 上一版回滚端口：`127.0.0.1:3100`
+- 自动更新：`infinite-canvas-deploy.timer` 每两分钟读取 GHCR `dev` 标签的 OCI revision，发现完整 SHA 变化后才部署。
+- 已验证：公网页面、TLS、`/healthz`、构建 SHA、哈希 JS/CSS、同源 YigeAI 健康代理、基础画布新建/节点/拖动/缩放/刷新恢复、真实回滚。
+- 保护证据：部署前后 `api.yigeai.work/health` 均为 HTTP 200，现有 YigeAI Nginx 配置与 Uptime Kuma 基线未变化；没有操作 Sub2API、PostgreSQL、Redis 或现有监控。
+
 ## 目标
 
 本方案用于把当前无限画布源码的二次开发版本部署到 YigeAI 服务器，满足：
