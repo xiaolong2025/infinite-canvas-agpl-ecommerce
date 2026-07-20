@@ -16,6 +16,13 @@ export type CanvasResourceReference = {
     active: boolean;
 };
 
+export function buildCanvasResourceReferences(nodes: CanvasNodeData[], connections: CanvasConnection[], contextNodeId?: string | null) {
+    const contextNodes = contextNodeId ? getMentionResourceNodes(contextNodeId, nodes, connections) : [];
+    const globalReferences = labelResourceNodes(nodes.filter(isResourceNode), false);
+    const activeByNodeId = new Map(labelResourceNodes(contextNodes, true).map((reference) => [reference.nodeId, reference]));
+    return globalReferences.map((reference) => activeByNodeId.get(reference.nodeId) || reference);
+}
+
 export function buildNodeMentionReferences(node: CanvasNodeData, nodes: CanvasNodeData[], connections: CanvasConnection[]) {
     return labelResourceNodes(getMentionResourceNodes(node.id, nodes, connections), true);
 }

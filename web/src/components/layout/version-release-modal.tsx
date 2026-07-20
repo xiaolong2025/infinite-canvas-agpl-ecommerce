@@ -1,7 +1,7 @@
 import type { CSSProperties } from "react";
 import { Modal, Tag, Timeline } from "antd";
 import { useVersionCheck } from "@/hooks/use-version-check";
-import { APP_VERSION } from "@/constant/env";
+import { APP_BUILD_SHA, APP_VERSION } from "@/constant/env";
 
 function getTagColor(type: string) {
     if (type === "新增") return "green";
@@ -33,7 +33,7 @@ export function VersionReleaseModal({ className, style }: VersionReleaseModalPro
                 title="查看版本更新"
             >
                 <span className="relative inline-flex">
-                    {APP_VERSION}
+                    <span title={`构建 SHA: ${APP_BUILD_SHA}`}>{APP_VERSION}</span>
                     {hasNewVersion ? <span className="absolute -right-1.5 -top-1 size-1.5 rounded-full bg-green-500" /> : null}
                 </span>
             </button>
@@ -42,6 +42,7 @@ export function VersionReleaseModal({ className, style }: VersionReleaseModalPro
                     <div className="rounded-lg border border-stone-200 p-3 dark:border-stone-800">
                         <div className="text-xs text-stone-500 dark:text-stone-400">当前版本</div>
                         <div className="mt-1 text-base font-semibold text-stone-950 dark:text-stone-100">{APP_VERSION}</div>
+                        <div className="mt-1 break-all font-mono text-[11px] text-stone-500 dark:text-stone-400">SHA: {APP_BUILD_SHA}</div>
                     </div>
                     <div className="rounded-lg border border-stone-200 p-3 dark:border-stone-800">
                         <div className="flex items-center justify-between gap-3">

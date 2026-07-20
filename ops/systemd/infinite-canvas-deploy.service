@@ -1,0 +1,16 @@
+[Unit]
+Description=Check and deploy the Infinite Canvas develop image
+After=docker.service network-online.target
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=oneshot
+Environment=CANVAS_ROOT_DIR=/opt/infinite-canvas
+Environment=CANVAS_IMAGE_NAME=ghcr.io/xiaolong2025/infinite-canvas
+Environment=CANVAS_PUBLIC_URL=https://canvas.yigeai.work/
+Environment=YIGEAI_HEALTH_URL=https://api.yigeai.work/health
+ExecStart=/opt/infinite-canvas/poll-and-deploy.sh
+
+[Install]
+WantedBy=multi-user.target

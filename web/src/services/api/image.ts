@@ -5,7 +5,7 @@ import { normalizePluginImages, runModelPlugin } from "./model-plugin";
 import { nanoid } from "nanoid";
 import { dataUrlToFile } from "@/lib/image-utils";
 import { buildImageReferencePromptText } from "@/lib/image-reference-prompt";
-import { imageToDataUrl } from "@/services/image-storage";
+import { imageToDataUrl, resolveImageUrl } from "@/services/image-storage";
 import type { ReferenceImage } from "@/types/image";
 
 export type AiTextMessage = {
@@ -20,10 +20,7 @@ type ResponseToolCall = {
     thoughtSignature?: string;
 };
 
-type ResponseInputMessage =
-    | AiTextMessage
-    | { type: "function_call"; call_id: string; name: string; arguments: string; thoughtSignature?: string }
-    | { role: "tool"; tool_call_id: string; content: string };
+type ResponseInputMessage = AiTextMessage | { type: "function_call"; call_id: string; name: string; arguments: string; thoughtSignature?: string } | { role: "tool"; tool_call_id: string; content: string };
 
 type ResponseFunctionTool = {
     type: "function";
@@ -43,10 +40,7 @@ type ToolResponseResult = {
 type ToolChoice = "auto" | "required" | { type: "function"; name: string };
 type ResponseMessageContent = AiTextMessage["content"] | string;
 type ResponseInputContent = { type: "input_text"; text: string } | { type: "input_image"; image_url: string };
-type ResponseInputItem =
-    | { role: "system" | "user" | "assistant"; content: string | ResponseInputContent[] }
-    | { type: "function_call"; call_id: string; name: string; arguments: string }
-    | { type: "function_call_output"; call_id: string; output: string };
+type ResponseInputItem = { role: "system" | "user" | "assistant"; content: string | ResponseInputContent[] } | { type: "function_call"; call_id: string; name: string; arguments: string } | { type: "function_call_output"; call_id: string; output: string };
 type ResponseApiToolDefinition = {
     type: "function";
     name: string;
@@ -54,13 +48,17 @@ type ResponseApiToolDefinition = {
     parameters: Record<string, unknown>;
     strict?: boolean;
 };
-type ResponseApiOutputItem =
-    | { type?: "message"; content?: Array<{ type?: string; text?: string }> }
-    | { type?: "function_call"; id?: string; call_id?: string; name?: string; arguments?: string };
+type ResponseApiOutputItem = { type?: "message"; content?: Array<{ type?: string; text?: string }> } | { type?: "function_call"; id?: string; call_id?: string; name?: string; arguments?: string };
 type ResponseApiPayload = {
     id?: string;
     output?: ResponseApiOutputItem[];
     output_text?: string;
+    error?: { message?: string };
+    code?: number;
+    msg?: string;
+};
+type ChatCompletionPayload = {
+    choices?: Array<{ message?: { content?: string } }>;
     error?: { message?: string };
     code?: number;
     msg?: string;
@@ -120,11 +118,6 @@ function normalizeQuality(quality: string) {
     const value = quality.trim().toLowerCase();
     const normalized = QUALITY_ALIASES[value] || value;
     return QUALITY_BASE[normalized] ? normalized : undefined;
-}
-
-/** Only "transparent" is forwarded; any other value (incl. empty) means keep the default opaque background. */
-function normalizeBackground(background: string | undefined) {
-    return background?.trim().toLowerCase() === "transparent" ? "transparent" : undefined;
 }
 
 /** Map "quality + ratio" to an explicit pixel dimension like "3840x2160". */
@@ -259,9 +252,19 @@ function parseImagePayload(payload: ImageApiResponse) {
 
 function readAxiosError(error: unknown, fallback: string) {
     if (axios.isCancel(error)) return "请求已取消";
-    if (axios.isAxiosError<{ error?: { message?: string }; msg?: string; code?: number }>(error)) {
+    if (axios.isAxiosError<{ error?: { message?: string } | string; msg?: string; message?: string; detail?: string; code?: number }>(error)) {
+        const status = error.response?.status;
+        if (status === 401 || status === 403 || status === 429) {
+            return readStatusError(status, fallback);
+        }
         const responseData = error.response?.data;
-        return responseData?.msg || responseData?.error?.message || readStatusError(error.response?.status, fallback);
+        const responseMessage = responseData?.msg || responseData?.message || responseData?.detail || (typeof responseData?.error === "string" ? responseData.error : responseData?.error?.message);
+        if (responseMessage) {
+            const normalizedMessage = responseMessage.trim().toLowerCase() === "upstream request failed" ? "上游模型请求失败" : responseMessage.trim();
+            return status ? `${normalizedMessage}（HTTP ${status}）` : normalizedMessage;
+        }
+        if (error.request && !error.response) return `${fallback}：网络或本地代理未返回响应`;
+        return readStatusError(status, fallback);
     }
     if (error instanceof DOMException && error.name === "AbortError") return "请求已取消";
     return error instanceof Error ? error.message : fallback;
@@ -287,6 +290,40 @@ function aiHeaders(config: AiConfig, contentType?: string) {
         Authorization: `Bearer ${config.apiKey}`,
         ...(contentType ? { "Content-Type": contentType } : {}),
     };
+}
+
+function isYigeAiGptImage2(config: Pick<AiConfig, "baseUrl" | "model">) {
+    const baseUrl = config.baseUrl.trim().replace(/\/+$/, "").toLowerCase();
+    const model = config.model.trim().toLowerCase();
+    return (baseUrl.includes("api.yigeai.work") || baseUrl.endsWith("/api/yigeai")) && (model === "gpt-image-2" || model === "gpt-image-2-all");
+}
+
+export function supportsImageReferenceInput(config: AiConfig) {
+    const requestConfig = resolveModelRequestConfig(config, config.model || config.imageModel);
+    if (resolveModelScript(config, config.model || config.imageModel)) return true;
+    if (requestConfig.apiFormat === "gemini") return true;
+    if (isYigeAiGptImage2(requestConfig)) return requestConfig.supportsImageReferences === true;
+    return !isYigeAiGptImage2(requestConfig);
+}
+
+async function requestOpenAiImages(config: AiConfig, prompt: string, count: number, quality: string | undefined, requestSize: string | undefined, options?: RequestOptions) {
+    const response = await axios.post<ImageApiResponse>(
+        aiApiUrl(config, "/images/generations"),
+        {
+            model: config.model,
+            prompt: withSystemPrompt(config, prompt),
+            n: count,
+            ...(quality ? { quality } : {}),
+            ...(requestSize ? { size: requestSize } : {}),
+            response_format: "b64_json",
+            output_format: IMAGE_OUTPUT_FORMAT,
+        },
+        {
+            headers: aiHeaders(config, "application/json"),
+            signal: options?.signal,
+        },
+    );
+    return parseImagePayload(response.data);
 }
 
 function geminiBaseUrl(config: Pick<AiConfig, "baseUrl">) {
@@ -315,6 +352,11 @@ function geminiHeaders(config: Pick<AiConfig, "apiKey">) {
 function withSystemMessage<T extends ResponseInputMessage>(config: AiConfig, messages: T[]): ResponseInputMessage[] {
     const systemPrompt = config.systemPrompt.trim();
     return systemPrompt ? [{ role: "system" as const, content: systemPrompt }, ...messages] : messages;
+}
+
+function withAiSystemMessage(config: AiConfig, messages: AiTextMessage[]): AiTextMessage[] {
+    const systemPrompt = config.systemPrompt.trim();
+    return systemPrompt ? [{ role: "system", content: systemPrompt }, ...messages] : messages;
 }
 
 function toResponseInput(messages: ResponseInputMessage[]): ResponseInputItem[] {
@@ -468,13 +510,28 @@ async function requestStreamingResponse(config: AiConfig, body: Record<string, u
     return { ...result, content: state.text || result.content };
 }
 
+async function requestChatCompletionResponse(config: AiConfig, messages: AiTextMessage[], onDelta?: (text: string) => void, options?: RequestOptions) {
+    const response = await fetch(aiApiUrl(config, "/chat/completions"), {
+        method: "POST",
+        headers: aiHeaders(config, "application/json"),
+        body: JSON.stringify({ model: config.model, messages }),
+        signal: options?.signal,
+    });
+    if (!response.ok) throw new Error(await readFetchError(response, "请求失败"));
+    const payload = (await response.json()) as ChatCompletionPayload;
+    if (typeof payload.code === "number" && payload.code !== 0) throw new Error(payload.msg || "请求失败");
+    if (payload.error?.message) throw new Error(payload.error.message);
+    const content = payload.choices?.[0]?.message?.content?.trim() || "";
+    if (content) onDelta?.(content);
+    return content;
+}
+
+function usesChatCompletions(config: AiConfig) {
+    return config.apiFormat === "openai" && config.model.trim().toLowerCase().startsWith("gemini-");
+}
+
 function toGeminiBody(config: AiConfig, messages: ResponseInputMessage[], extra?: Record<string, unknown>) {
-    const systemText = [
-        config.systemPrompt.trim(),
-        ...messages.flatMap((message) => (!("type" in message) && message.role === "system" ? [geminiTextContent(message.content)] : [])),
-    ]
-        .filter(Boolean)
-        .join("\n\n");
+    const systemText = [config.systemPrompt.trim(), ...messages.flatMap((message) => (!("type" in message) && message.role === "system" ? [geminiTextContent(message.content)] : []))].filter(Boolean).join("\n\n");
     const contents = toGeminiContents(messages.filter((message) => ("type" in message ? true : message.role !== "system")));
     return {
         contents,
@@ -534,10 +591,7 @@ function toGeminiToolOptions(tools: ResponseFunctionTool[], toolChoice: ToolChoi
         description: tool.function.description,
         parameters: tool.function.parameters,
     }));
-    const functionCallingConfig =
-        typeof toolChoice === "object"
-            ? { mode: "ANY", allowedFunctionNames: [toolChoice.name] }
-            : { mode: toolChoice === "required" ? "ANY" : "AUTO" };
+    const functionCallingConfig = typeof toolChoice === "object" ? { mode: "ANY", allowedFunctionNames: [toolChoice.name] } : { mode: toolChoice === "required" ? "ANY" : "AUTO" };
     return {
         tools: [{ functionDeclarations }],
         toolConfig: { functionCallingConfig },
@@ -666,7 +720,6 @@ export async function requestGeneration(config: AiConfig, prompt: string, option
     if (script) {
         const quality = normalizeQuality(config.quality);
         const requestSize = resolveRequestSize(quality, config.size);
-        const background = normalizeBackground(config.background);
         try {
             const result = await runModelPlugin({
                 capability: "image",
@@ -674,7 +727,7 @@ export async function requestGeneration(config: AiConfig, prompt: string, option
                 config: requestConfig,
                 prompt: withSystemPrompt(requestConfig, prompt),
                 images: [],
-                params: { size: requestSize, quality, count: n, ...(background ? { background } : {}) },
+                params: { size: requestSize, quality, count: n },
                 signal: options?.signal,
             });
             return normalizePluginImages(result).map((dataUrl) => ({ id: nanoid(), dataUrl }));
@@ -691,27 +744,8 @@ export async function requestGeneration(config: AiConfig, prompt: string, option
     }
     const quality = normalizeQuality(config.quality);
     const requestSize = resolveRequestSize(quality, config.size);
-    const background = normalizeBackground(config.background);
     try {
-        const response = await axios.post<ImageApiResponse>(
-            aiApiUrl(requestConfig, "/images/generations"),
-            {
-                model: requestConfig.model,
-                prompt: withSystemPrompt(requestConfig, prompt),
-                n,
-                ...(quality ? { quality } : {}),
-                ...(requestSize ? { size: requestSize } : {}),
-                ...(background ? { background } : {}),
-                response_format: "b64_json",
-                output_format: IMAGE_OUTPUT_FORMAT,
-            },
-            {
-                headers: aiHeaders(requestConfig, "application/json"),
-                signal: options?.signal,
-            },
-        );
-        const images = parseImagePayload(response.data);
-        return images;
+        return await requestOpenAiImages(requestConfig, prompt, n, quality, requestSize, options);
     } catch (error) {
         throw new Error(readAxiosError(error, "请求失败"));
     }
@@ -725,7 +759,6 @@ export async function requestEdit(config: AiConfig, prompt: string, references: 
     if (script) {
         const quality = normalizeQuality(config.quality);
         const requestSize = resolveRequestSize(quality, config.size);
-        const background = normalizeBackground(config.background);
         const refs = await Promise.all(references.map((image) => imageToDataUrl(image)));
         try {
             const result = await runModelPlugin({
@@ -734,7 +767,7 @@ export async function requestEdit(config: AiConfig, prompt: string, references: 
                 config: requestConfig,
                 prompt: withSystemPrompt(requestConfig, requestPrompt),
                 images: refs,
-                params: { size: requestSize, quality, count: n, ...(background ? { background } : {}) },
+                params: { size: requestSize, quality, count: n },
                 signal: options?.signal,
             });
             return normalizePluginImages(result).map((dataUrl) => ({ id: nanoid(), dataUrl }));
@@ -752,7 +785,14 @@ export async function requestEdit(config: AiConfig, prompt: string, references: 
     }
     const quality = normalizeQuality(config.quality);
     const requestSize = resolveRequestSize(quality, config.size);
-    const background = normalizeBackground(config.background);
+    if (isYigeAiGptImage2(requestConfig) && requestConfig.supportsImageReferences !== true && !mask) {
+        const fallbackPrompt = [requestPrompt, "", "当前调用为不携带参考图片的低成本故事板预演。优先准确呈现剧情动作、镜头构图、服装颜色、服装图案和场景连续性；不要声称复制了参考人物面孔。"].join("\n");
+        try {
+            return await requestOpenAiImages(requestConfig, fallbackPrompt, n, quality, requestSize, options);
+        } catch (error) {
+            throw new Error(readAxiosError(error, "故事板预演出图失败"));
+        }
+    }
     const formData = new FormData();
     formData.set("model", requestConfig.model);
     formData.set("prompt", withSystemPrompt(requestConfig, requestPrompt));
@@ -765,12 +805,14 @@ export async function requestEdit(config: AiConfig, prompt: string, references: 
     if (requestSize) {
         formData.set("size", requestSize);
     }
-    if (background) {
-        formData.set("background", background);
-    }
-    const files = await Promise.all(references.map(async (image) => dataUrlToFile({ ...image, dataUrl: await imageToDataUrl(image) })));
+    const files = await Promise.all(
+        references.map(async (image) => {
+            const url = await resolveImageUrl(image.storageKey, image.url || image.dataUrl);
+            return dataUrlToFile({ ...image, url, dataUrl: url });
+        }),
+    );
     files.forEach((file) => formData.append("image", file));
-    if (mask) formData.set("mask", dataUrlToFile(mask));
+    if (mask) formData.set("mask", await dataUrlToFile(mask));
 
     try {
         const response = await axios.post<ImageApiResponse>(aiApiUrl(requestConfig, "/images/edits"), formData, { headers: aiHeaders(requestConfig), signal: options?.signal });
@@ -807,10 +849,23 @@ export async function requestImageQuestion(config: AiConfig, messages: AiTextMes
             if (answer === "没有返回内容") onDelta(answer);
             return answer;
         }
-        const answer = (await requestStreamingResponse(requestConfig, {
-            model: requestConfig.model,
-            input: toResponseInput(withSystemMessage(requestConfig, messages)),
-        }, onDelta, options)).content || "没有返回内容";
+        if (usesChatCompletions(requestConfig)) {
+            const answer = (await requestChatCompletionResponse(requestConfig, withAiSystemMessage(requestConfig, messages), onDelta, options)) || "没有返回内容";
+            if (answer === "没有返回内容") onDelta(answer);
+            return answer;
+        }
+        const answer =
+            (
+                await requestStreamingResponse(
+                    requestConfig,
+                    {
+                        model: requestConfig.model,
+                        input: toResponseInput(withSystemMessage(requestConfig, messages)),
+                    },
+                    onDelta,
+                    options,
+                )
+            ).content || "没有返回内容";
         if (answer === "没有返回内容") onDelta(answer);
         return answer;
     } catch (error) {

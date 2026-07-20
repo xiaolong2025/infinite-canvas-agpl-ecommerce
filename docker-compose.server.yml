@@ -1,0 +1,18 @@
+services:
+  app:
+    image: ${CANVAS_IMAGE:?CANVAS_IMAGE is required}
+    container_name: ${CANVAS_CONTAINER:?CANVAS_CONTAINER is required}
+    ports:
+      - "127.0.0.1:${CANVAS_PORT:?CANVAS_PORT is required}:3000"
+    restart: unless-stopped
+    environment:
+      ANALYTICS_GA4_ID: ${ANALYTICS_GA4_ID:-}
+      ANALYTICS_BAIDU_ID: ${ANALYTICS_BAIDU_ID:-}
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:3000/healthz || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 5s
+    security_opt:
+      - no-new-privileges:true

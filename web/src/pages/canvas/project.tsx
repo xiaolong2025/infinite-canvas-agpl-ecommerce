@@ -1,23 +1,26 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { ChangeEvent as ReactChangeEvent, DragEvent as ReactDragEvent, MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
-import { Group, Video } from "lucide-react";
+import { BookOpen, Bot, CheckCircle2, Clapperboard, FilePenLine, Group, Home, ImageIcon, Images, List, ListChecks, Menu, Music2, Pencil, Plus, Redo2, RefreshCw, Settings2, Trash2, Undo2, Upload, Video, X } from "lucide-react";
 import { saveAs } from "file-saver";
 
-import { requestEdit, requestGeneration, requestImageQuestion } from "@/services/api/image";
+import { requestEdit, requestGeneration, requestImageQuestion, supportsImageReferenceInput } from "@/services/api/image";
 import { requestAudioGeneration, storeGeneratedAudio } from "@/services/api/audio";
 import { requestVideoGeneration, storeGeneratedVideo } from "@/services/api/video";
-import { defaultConfig, useConfigStore, useEffectiveConfig } from "@/stores/use-config-store";
-import { uploadImage } from "@/services/image-storage";
-import { uploadMediaFile } from "@/services/file-storage";
+import { buildReferenceVideoAnalysisMessages, extractVideoFrames } from "@/services/video-analysis";
+import { DOCS_URL } from "@/constant/env";
+import { decodeChannelModel, defaultConfig, selectableModelsByCapability, type AiConfig, type ModelCapability, useConfigStore, useEffectiveConfig } from "@/stores/use-config-store";
+import { imageToDataUrl, resolveImageUrl, uploadImage, type UploadedImage } from "@/services/image-storage";
+import { resolveMediaUrl, uploadMediaFile, type UploadedFile } from "@/services/file-storage";
 import { nanoid } from "nanoid";
 import { getDataUrlByteSize, readImageMeta } from "@/lib/image-utils";
 import { canvasThemes, type CanvasBackgroundMode } from "@/lib/canvas-theme";
+import { UserStatusActions } from "@/components/layout/user-status-actions";
 import { useAssetStore } from "@/stores/use-asset-store";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { cropDataUrl, splitDataUrl, upscaleDataUrl } from "@/lib/canvas/canvas-image-data";
 import { fitNodeSize, nodeSizeFromRatio } from "@/lib/canvas/canvas-node-size";
-import { App, Button, Modal } from "antd";
+import { App, Button, Dropdown, Modal } from "antd";
 import { NODE_DEFAULT_SIZE, getNodeSpec } from "@/constant/canvas";
 import { ActiveConnectionPath, ConnectionPath } from "@/components/canvas/canvas-connections";
 import { CanvasConfigComposer } from "@/components/canvas/canvas-config-composer";
@@ -30,6 +33,7 @@ import { CanvasNodeSplitDialog, type CanvasImageSplitParams } from "@/components
 import { CanvasNodeUpscaleDialog, type CanvasImageUpscaleParams } from "@/components/canvas/canvas-node-upscale-dialog";
 import { buildNodeGenerationContext, buildNodeGenerationInputs, buildNodeResponseMessages, hydrateNodeGenerationContext, type NodeGenerationInput } from "@/components/canvas/canvas-node-generation";
 import { CanvasNodeHoverToolbar, CanvasNodeInfoModal } from "@/components/canvas/canvas-node-hover-toolbar";
+import { HookSelectionModal, ProductScriptModal, StoryboardImagePromptModal } from "@/components/canvas/ecommerce-workflow-dialogs";
 import { InfiniteCanvas } from "@/components/canvas/infinite-canvas";
 import { Minimap } from "@/components/canvas/canvas-mini-map";
 import { CanvasNode } from "@/components/canvas/canvas-node";
@@ -40,52 +44,56 @@ import { CanvasSidePanel } from "@/components/canvas/canvas-side-panel";
 import { CanvasZoomControls } from "@/components/canvas/canvas-zoom-controls";
 import { useAgentStore } from "@/stores/use-agent-store";
 import { useCanvasStore } from "@/stores/canvas/use-canvas-store";
-import { useAgentBridge } from "@/pages/canvas/hooks/use-agent-bridge";
-import { usePluginHost } from "@/pages/canvas/hooks/use-plugin-host";
-import { buildNodeMentionReferences, type CanvasResourceReference } from "@/lib/canvas/canvas-resource-references";
-import { exportCanvasProjects } from "@/lib/canvas/canvas-export";
-import { applyNodeConfigPatch, audioMetadata, buildAudioGenerationMetadata, buildImageGenerationMetadata, createCanvasNode, imageMetadata, videoMetadata } from "@/lib/canvas/canvas-node-factory";
-import { findContainingGroupId, findGroupDropTarget, getConnectionTargetAnchor, isHiddenBatchChild, isHiddenBatchConnectionEndpoint, normalizeConnection, snapNodesIntoGroup } from "@/lib/canvas/canvas-node-geometry";
-import {
-    audioExtension,
-    buildAngleLabel,
-    buildAnglePrompt,
-    buildGenerationConfig,
-    findRetrySourceNode,
-    generationReferenceUrls,
-    getGenerationCount,
-    getInputSummary,
-    hydrateAssistantImages,
-    hydrateCanvasImages,
-    imageExtension,
-    isAudioFile,
-    isGenerationCanceled,
-    resetInterruptedGeneration,
-    resolveMetadataReferences,
-    sourceNodeReferenceImages,
-} from "@/lib/canvas/canvas-generation-helpers";
-import { getNodeDefinition, isBuiltinNodeType as isBuiltinType, useNodeRegistryVersion } from "@/lib/canvas/node-registry";
+import { applyCanvasAgentOps, type CanvasAgentOp, type CanvasAgentSnapshot } from "@/lib/canvas/canvas-agent-ops";
+import { buildCanvasResourceReferences, buildNodeMentionReferences } from "@/lib/canvas/canvas-resource-references";
+import { getNodeDefinition, isBuiltinNodeType as isBuiltinType, listNodeDefinitions, useNodeRegistryVersion } from "@/lib/canvas/node-registry";
+import { buildNodeContext } from "@/lib/canvas/plugin-node-context";
+import { ensurePluginsLoaded } from "@/lib/canvas/plugin-loader";
 import { registerBuiltinNodes } from "@/components/canvas/nodes/builtin-nodes";
 import { CanvasPluginManagerModal } from "@/components/canvas/canvas-plugin-manager-modal";
-import { CanvasRefreshShell } from "@/components/canvas/canvas-refresh-shell";
-import { CanvasTopBar } from "@/components/canvas/canvas-top-bar";
-import { ConnectionCreateMenu, NodeCreateMenu, type PendingConnectionCreate } from "@/components/canvas/canvas-create-menus";
+import type { CanvasNodeToolbarItem, CanvasPluginAi, CanvasPluginHost } from "@/types/canvas-plugin";
+import {
+    buildHookOptionsMessages,
+    buildCharacterReferencePrompt,
+    buildProductBriefMarkdown,
+    buildSalesScriptMessages,
+    buildStoryboardFramePrompt,
+    buildStoryboardMessages,
+    buildStoryboardRepairMessages,
+    formatHookOptionsMarkdown,
+    formatStoryboardMarkdown,
+    normalizeStoryboardImageNodeSize,
+    parseHookOptionsResponse,
+    parseStoryboardResponse,
+    STORYBOARD_PREVIEW_QUALITY,
+    STORYBOARD_PREVIEW_REQUEST_SIZE,
+    STORYBOARD_IMAGE_NODE_SIZE,
+    STORYBOARD_IMAGE_NODE_SIZE_VERSION,
+    validateSalesScriptResponse,
+    validateStoryboardForGeneration,
+    workflowKindOf,
+} from "@/lib/canvas/ecommerce-workflow";
+import { STORYBOARD_IMAGE_MIN_INTERVAL_MS, StoryboardImageRequestQueue, type StoryboardImageRequestQueueEvent } from "@/lib/canvas/storyboard-image-request-queue";
 import {
     CanvasNodeType,
     type CanvasAssistantImage,
     type CanvasAssistantSession,
     type CanvasConnection,
+    type CanvasImageGenerationType,
     type CanvasNodeData,
     type CanvasNodeMetadata,
     type CanvasNodeTypeId,
     type ConnectionHandle,
     type ContextMenuState,
+    type EcommerceHookOption,
+    type EcommerceProductBrief,
+    type EcommerceProductReference,
     type Position,
     type SelectionBox,
     type ViewportTransform,
 } from "@/types/canvas";
 import type { ReferenceImage } from "@/types/image";
-import type { ReferenceAudio } from "@/types/media";
+import type { ReferenceAudio, ReferenceVideo } from "@/types/media";
 
 // 内置节点注册到统一注册表(模块加载时执行一次)
 registerBuiltinNodes();
@@ -93,6 +101,28 @@ registerBuiltinNodes();
 type CanvasClipboard = {
     nodes: CanvasNodeData[];
     connections: CanvasConnection[];
+};
+
+async function requestStoryboardWithRepair(config: AiConfig, script: string, productBrief: string, references: ReferenceImage[], signal: AbortSignal, onRepair: () => void) {
+    const response = await requestImageQuestion(config, buildStoryboardMessages(script, productBrief, references), () => undefined, { signal });
+    try {
+        return parseStoryboardResponse(response, script);
+    } catch (firstError) {
+        onRepair();
+        const firstErrorMessage = firstError instanceof Error ? firstError.message : "分镜结构不完整";
+        const repairedResponse = await requestImageQuestion(config, buildStoryboardRepairMessages(script, productBrief, references, response, firstErrorMessage), () => undefined, { signal });
+        try {
+            return parseStoryboardResponse(repairedResponse, script);
+        } catch (repairError) {
+            const repairErrorMessage = repairError instanceof Error ? repairError.message : "分镜结构仍不完整";
+            throw new Error(`分镜自动修复仍未通过：${repairErrorMessage}`);
+        }
+    }
+}
+
+type PendingConnectionCreate = {
+    connection: ConnectionHandle;
+    position: Position;
 };
 
 type ConnectionDropTarget = {
@@ -116,8 +146,6 @@ type CanvasGenerationRequest = {
 
 const VIDEO_NODE_MAX_WIDTH = 420;
 const VIDEO_NODE_MAX_HEIGHT = 420;
-// 稳定的空引用数组:避免每次渲染 `... || []` 产生新数组引用而击穿 CanvasNode 的 React.memo
-const EMPTY_REFERENCES: CanvasResourceReference[] = [];
 const CONNECTION_HANDLE_HIT_RADIUS = 40;
 const CONNECTION_NODE_HIT_PADDING = 32;
 const NODE_STATUS_IDLE = "idle" as const;
@@ -131,6 +159,24 @@ const IMAGE_PROMPT_REVERSE_PRESET = `请根据参考图片反推一段适合用�
 2. 覆盖主体、构图、风格、光线、色彩、材质、镜头和氛围。
 3. 尽量写成可直接用于生图模型的完整提示词。`;
 
+function createCanvasNode(type: CanvasNodeTypeId, position: Position, metadata?: CanvasNodeMetadata): CanvasNodeData {
+    const spec = getNodeSpec(type);
+    const id = `${type}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+
+    return {
+        id,
+        type,
+        title: spec.title,
+        position: {
+            x: position.x - spec.width / 2,
+            y: position.y - spec.height / 2,
+        },
+        width: spec.width,
+        height: spec.height,
+        metadata: { ...spec.metadata, ...metadata },
+    };
+}
+
 export default function CanvasPage() {
     const [mounted, setMounted] = useState(false);
 
@@ -141,6 +187,141 @@ export default function CanvasPage() {
     if (!mounted) return <CanvasRefreshShell />;
 
     return <InfiniteCanvasPage />;
+}
+
+function CanvasRefreshShell() {
+    return (
+        <main className="relative h-full min-h-0 overflow-hidden bg-background text-foreground">
+            <div
+                className="absolute inset-0 opacity-60"
+                style={{
+                    backgroundImage: "radial-gradient(circle, var(--border) 1px, transparent 1px)",
+                    backgroundSize: "28px 28px",
+                }}
+            />
+
+            <div className="absolute bottom-5 left-1/2 z-50 flex h-14 -translate-x-1/2 items-center gap-1 rounded-xl border px-2 shadow-lg backdrop-blur" style={{ background: "var(--background)", borderColor: "var(--border)" }} aria-hidden="true">
+                {Array.from({ length: 7 }).map((_, index) => (
+                    <div key={index} className="size-8 rounded-md bg-current opacity-10" />
+                ))}
+            </div>
+
+            <div className="absolute bottom-24 left-6 z-50 h-40 w-[240px] rounded-lg border shadow-2xl backdrop-blur-sm" style={{ background: "var(--background)", borderColor: "var(--border)" }} aria-hidden="true">
+                <div className="absolute left-7 top-7 h-5 w-12 rounded-sm bg-current opacity-10" />
+                <div className="absolute left-28 top-16 h-6 w-16 rounded-sm bg-current opacity-10" />
+                <div className="absolute bottom-7 left-16 h-8 w-20 rounded-sm bg-current opacity-10" />
+                <div className="absolute inset-5 rounded border border-current opacity-15" />
+            </div>
+
+            <div className="absolute bottom-5 left-5 z-50 flex h-14 w-[260px] items-center gap-2 rounded-xl border px-2 shadow-lg backdrop-blur" style={{ background: "var(--background)", borderColor: "var(--border)" }} aria-hidden="true">
+                <div className="size-8 rounded-md bg-current opacity-10" />
+                <div className="size-8 rounded-md bg-current opacity-10" />
+                <div className="h-1 flex-1 rounded-full bg-current opacity-10" />
+                <div className="h-4 w-10 rounded bg-current opacity-10" />
+                <div className="size-8 rounded-md bg-current opacity-10" />
+            </div>
+        </main>
+    );
+}
+
+function ConnectionCreateMenu({
+    pending,
+    onCreate,
+    onClose,
+}: {
+    pending: PendingConnectionCreate;
+    onCreate: (type: CanvasNodeType.Image | CanvasNodeType.Text | CanvasNodeType.Config | CanvasNodeType.Video | CanvasNodeType.Audio) => void;
+    onClose: () => void;
+}) {
+    const theme = canvasThemes[useThemeStore((state) => state.theme)];
+    return (
+        <div
+            className="absolute z-[120] w-[300px] rounded-[18px] border p-3 shadow-2xl backdrop-blur"
+            data-connection-create-menu
+            style={{ left: pending.position.x, top: pending.position.y, background: theme.node.panel, borderColor: theme.node.stroke, color: theme.node.text }}
+            onMouseDown={(event) => event.stopPropagation()}
+            onPointerDown={(event) => event.stopPropagation()}
+        >
+            <div className="mb-2 flex items-center justify-between px-1">
+                <span className="text-sm font-medium" style={{ color: theme.node.muted }}>
+                    引用该节点生成
+                </span>
+                <button type="button" className="grid size-7 place-items-center rounded-lg text-base opacity-55 transition hover:bg-white/10 hover:opacity-100" onClick={onClose} aria-label="关闭">
+                    ×
+                </button>
+            </div>
+            <div className="grid gap-1">
+                <ConnectionCreateOption theme={theme} icon={<List className="size-5" />} title="文本生成" description="脚本、广告词、品牌文案" onClick={() => onCreate(CanvasNodeType.Text)} />
+                <ConnectionCreateOption theme={theme} icon={<ImageIcon className="size-5" />} title="图片生成" onClick={() => onCreate(CanvasNodeType.Image)} />
+                <ConnectionCreateOption theme={theme} icon={<Video className="size-5" />} title="视频生成" onClick={() => onCreate(CanvasNodeType.Video)} />
+                <ConnectionCreateOption theme={theme} icon={<Music2 className="size-5" />} title="音频参考" onClick={() => onCreate(CanvasNodeType.Audio)} />
+                <ConnectionCreateOption theme={theme} icon={<Settings2 className="size-5" />} title="配置节点" description="模型、尺寸、数量和输入顺序" onClick={() => onCreate(CanvasNodeType.Config)} />
+            </div>
+        </div>
+    );
+}
+
+function ConnectionCreateOption({ theme, icon, title, description, onClick }: { theme: (typeof canvasThemes)[keyof typeof canvasThemes]; icon: React.ReactNode; title: string; description?: string; onClick?: () => void }) {
+    return (
+        <button
+            type="button"
+            className="flex h-16 w-full cursor-pointer items-center gap-3 rounded-2xl px-3 text-left transition"
+            style={{ color: theme.node.text }}
+            onClick={onClick}
+            onMouseEnter={(event) => (event.currentTarget.style.background = theme.node.fill)}
+            onMouseLeave={(event) => (event.currentTarget.style.background = "transparent")}
+        >
+            <span className="grid size-11 shrink-0 place-items-center rounded-xl" style={{ background: theme.node.fill, color: theme.node.muted }}>
+                {icon}
+            </span>
+            <span className="min-w-0 flex-1">
+                <span className="flex items-center gap-2 text-base font-semibold leading-5">{title}</span>
+                {description ? (
+                    <span className="mt-1 block truncate text-sm" style={{ color: theme.node.muted }}>
+                        {description}
+                    </span>
+                ) : null}
+            </span>
+        </button>
+    );
+}
+
+function NodeCreateMenu({ position, onCreate, onClose }: { position: Position; onCreate: (type: string) => void; onClose: () => void }) {
+    const theme = canvasThemes[useThemeStore((state) => state.theme)];
+    useNodeRegistryVersion();
+    const menuRef = useRef<HTMLDivElement>(null);
+    const definitions = listNodeDefinitions().filter((def) => def.showInCreateMenu !== false);
+    // 点击菜单外的空白处自动关闭
+    useEffect(() => {
+        const handlePointerDown = (event: PointerEvent) => {
+            if (menuRef.current && !menuRef.current.contains(event.target as Node)) onClose();
+        };
+        document.addEventListener("pointerdown", handlePointerDown, true);
+        return () => document.removeEventListener("pointerdown", handlePointerDown, true);
+    }, [onClose]);
+    return (
+        <div
+            ref={menuRef}
+            className="absolute z-[120] max-h-[70vh] w-[300px] overflow-y-auto rounded-[18px] border p-3 shadow-2xl backdrop-blur thin-scrollbar"
+            data-canvas-no-zoom
+            style={{ left: position.x, top: position.y, background: theme.node.panel, borderColor: theme.node.stroke, color: theme.node.text }}
+            onPointerDown={(event) => event.stopPropagation()}
+        >
+            <div className="mb-2 flex items-center justify-between px-1">
+                <span className="text-sm font-medium" style={{ color: theme.node.muted }}>
+                    选择节点
+                </span>
+                <button type="button" className="grid size-7 place-items-center rounded-lg opacity-55 transition hover:opacity-100" onClick={onClose} aria-label="关闭">
+                    <X className="size-4" />
+                </button>
+            </div>
+            <div className="grid gap-1">
+                {definitions.map((def) => (
+                    <ConnectionCreateOption key={def.type} theme={theme} icon={def.icon} title={def.title} description={def.description} onClick={() => onCreate(def.type)} />
+                ))}
+            </div>
+        </div>
+    );
 }
 
 function InfiniteCanvasPage() {
@@ -157,6 +338,7 @@ function InfiniteCanvasPage() {
     const agentPanelOpen = useAgentStore((state) => state.panelOpen);
     const toggleAgentPanel = useAgentStore((state) => state.togglePanel);
     const openAgentPanel = useAgentStore((state) => state.openPanel);
+    const setAgentCanvasContext = useAgentStore((state) => state.setCanvasContext);
     const containerRef = useRef<HTMLDivElement>(null);
     const imageInputRef = useRef<HTMLInputElement>(null);
     const uploadTargetRef = useRef<{ nodeId?: string; position?: Position } | null>(null);
@@ -235,6 +417,10 @@ function InfiniteCanvasPage() {
     const [superResolveNodeId, setSuperResolveNodeId] = useState<string | null>(null);
     const [angleNodeId, setAngleNodeId] = useState<string | null>(null);
     const [previewNodeId, setPreviewNodeId] = useState<string | null>(null);
+    const [productScriptSourceNodeId, setProductScriptSourceNodeId] = useState<string | null>(null);
+    const [hookSelectionNodeId, setHookSelectionNodeId] = useState<string | null>(null);
+    const [storyboardImagePromptNodeId, setStoryboardImagePromptNodeId] = useState<string | null>(null);
+    const [agentUndoSnapshot, setAgentUndoSnapshot] = useState<CanvasAgentSnapshot | null>(null);
     const [titleEditing, setTitleEditing] = useState(false);
     const [titleDraft, setTitleDraft] = useState("");
     const [historyState, setHistoryState] = useState({ canUndo: false, canRedo: false });
@@ -247,13 +433,56 @@ function InfiniteCanvasPage() {
     const connectionsRef = useRef(connections);
     const selectedNodeIdsRef = useRef(selectedNodeIds);
     const viewportRef = useRef(viewport);
-    const focusAnimRef = useRef<number | null>(null);
     const generateNodeRef = useRef<((nodeId: string, mode: CanvasNodeGenerationMode, prompt: string) => Promise<void>) | null>(null);
     const connectingParamsRef = useRef(connectingParams);
     const connectionTargetNodeIdRef = useRef(connectionTargetNodeId);
     const selectionBoxRef = useRef(selectionBox);
     const pendingConnectionCreateRef = useRef(pendingConnectionCreate);
     const generationRequestsRef = useRef(new Map<string, CanvasGenerationRequest>());
+    const storyboardImageRequestQueueRef = useRef(new StoryboardImageRequestQueue());
+
+    const updateStoryboardGenerationPhase = useCallback((nodeId: string, event: StoryboardImageRequestQueueEvent) => {
+        const now = Date.now();
+        setNodes((prev) =>
+            prev.map((node) =>
+                node.id === nodeId
+                    ? {
+                          ...node,
+                          metadata: {
+                              ...node.metadata,
+                              status: NODE_STATUS_LOADING,
+                              errorDetails: undefined,
+                              storyboardGenerationPhase: event.phase,
+                              storyboardGenerationQueuedAt: event.phase === "queued" ? now : node.metadata?.storyboardGenerationQueuedAt || now,
+                              storyboardGenerationStartedAt: event.phase === "queued" ? undefined : node.metadata?.storyboardGenerationStartedAt || now,
+                              storyboardGenerationAttempt: event.attempt || undefined,
+                              storyboardGenerationRetryDelayMs: event.retryDelayMs,
+                              storyboardGenerationElapsedMs: undefined,
+                          },
+                      }
+                    : node,
+            ),
+        );
+    }, []);
+
+    const markStoryboardGenerationSaving = useCallback((nodeId: string, attempt: number) => {
+        setNodes((prev) =>
+            prev.map((node) =>
+                node.id === nodeId
+                    ? {
+                          ...node,
+                          metadata: {
+                              ...node.metadata,
+                              status: NODE_STATUS_LOADING,
+                              storyboardGenerationPhase: "saving",
+                              storyboardGenerationAttempt: attempt,
+                              storyboardGenerationRetryDelayMs: undefined,
+                          },
+                      }
+                    : node,
+            ),
+        );
+    }, []);
 
     const createHistoryEntry = useCallback(
         (): CanvasHistoryEntry => ({
@@ -324,7 +553,7 @@ function InfiniteCanvasPage() {
         }
 
         const restore = async () => {
-            const restoredNodes = await hydrateCanvasImages(resetInterruptedGeneration(project.nodes));
+            const restoredNodes = await hydrateCanvasImages(resetInterruptedGeneration(project.nodes).map(normalizeStoryboardImageNodeSize));
             const restoredSessions = await hydrateAssistantImages(project.chatSessions || []);
             setNodes(restoredNodes);
             setConnections(project.connections);
@@ -356,6 +585,19 @@ function InfiniteCanvasPage() {
         if (!projectLoaded || !["new", "recent", "choose"].includes(searchParams.get("mode") || "")) return;
         if (!searchParams.has("agentUrl")) openAgentPanel();
     }, [openAgentPanel, projectLoaded, searchParams]);
+
+    useEffect(() => {
+        if (!projectLoaded) return;
+        setNodes((prev) => {
+            let changed = false;
+            const normalized = prev.map((node) => {
+                const next = normalizeStoryboardImageNodeSize(node);
+                if (next !== node) changed = true;
+                return next;
+            });
+            return changed ? normalized : prev;
+        });
+    }, [nodes, projectLoaded]);
 
     useEffect(() => {
         if (!projectLoaded || applyingHistoryRef.current || historyPausedRef.current) return;
@@ -576,10 +818,7 @@ function InfiniteCanvasPage() {
     }, [collapsingBatchIds, nodes, size.height, size.width, viewport.k, viewport.x, viewport.y]);
 
     const nodeById = useMemo(() => new Map(nodes.map((node) => [node.id, node])), [nodes]);
-    // 工具条跟随「单选节点」:点击/新建/框选/键盘选中任一节点都会显示,不再仅靠精确点中触发。
-    // 多选时不显示;拖拽中由下方 isNodeDragging 守卫隐藏。
-    const singleSelectedNodeId = selectedNodeIds.size === 1 ? Array.from(selectedNodeIds)[0] : null;
-    const toolbarNode = (toolbarNodeId ? nodeById.get(toolbarNodeId) || null : null) || (singleSelectedNodeId ? nodeById.get(singleSelectedNodeId) || null : null);
+    const toolbarNode = toolbarNodeId ? nodeById.get(toolbarNodeId) || null : null;
     const infoNode = infoNodeId ? nodeById.get(infoNodeId) || null : null;
     const cropNode = cropNodeId ? nodeById.get(cropNodeId) || null : null;
     const maskEditNode = maskEditNodeId ? nodeById.get(maskEditNodeId) || null : null;
@@ -588,6 +827,9 @@ function InfiniteCanvasPage() {
     const superResolveNode = superResolveNodeId ? nodeById.get(superResolveNodeId) || null : null;
     const angleNode = angleNodeId ? nodeById.get(angleNodeId) || null : null;
     const previewNode = previewNodeId ? nodeById.get(previewNodeId) || null : null;
+    const productScriptSourceNode = productScriptSourceNodeId ? nodeById.get(productScriptSourceNodeId) || null : null;
+    const hookSelectionNode = hookSelectionNodeId ? nodeById.get(hookSelectionNodeId) || null : null;
+    const storyboardImagePromptNode = storyboardImagePromptNodeId ? nodeById.get(storyboardImagePromptNodeId) || null : null;
     const hasMultipleSelectedNodes = selectedNodeIds.size > 1;
     const activeNodeId = hasMultipleSelectedNodes ? null : hoveredNodeId || (selectedNodeIds.size === 1 ? Array.from(selectedNodeIds)[0] : null);
     const batchChildCountById = useMemo(() => {
@@ -643,43 +885,164 @@ function InfiniteCanvasPage() {
         });
         return map;
     }, [connections, nodes]);
+    const resourceContextNodeId = dialogNodeId || activeNodeId;
+    const canvasResourceReferences = useMemo(() => buildCanvasResourceReferences(nodes, connections, resourceContextNodeId), [connections, nodes, resourceContextNodeId]);
+    const resourceReferenceByNodeId = useMemo(() => new Map(canvasResourceReferences.map((reference) => [reference.nodeId, reference])), [canvasResourceReferences]);
     const mentionReferencesByNodeId = useMemo(() => {
         const map = new Map<string, ReturnType<typeof buildNodeMentionReferences>>();
         nodes.forEach((node) => map.set(node.id, buildNodeMentionReferences(node, nodes, connections)));
         return map;
     }, [connections, nodes]);
-    const { applyAgentOps } = useAgentBridge({
-        projectId,
-        title: currentProject?.title,
-        nodes,
-        connections,
-        selectedNodeIds,
-        viewport,
-        nodesRef,
-        connectionsRef,
-        selectedNodeIdsRef,
-        viewportRef,
-        generateNodeRef,
-        setNodes,
-        setConnections,
-        setSelectedNodeIds,
-        setSelectedConnectionId,
-        setViewport,
-        setContextMenu,
-    });
+    const agentSnapshot = useMemo<CanvasAgentSnapshot>(
+        () => ({ projectId, title: currentProject?.title || "未命名画布", nodes, connections, selectedNodeIds: Array.from(selectedNodeIds), viewport }),
+        [connections, currentProject?.title, nodes, projectId, selectedNodeIds, viewport],
+    );
+    const applyAgentOps = useCallback(
+        (ops?: CanvasAgentOp[]) => {
+            const safeOps = Array.isArray(ops) ? ops.filter((op) => op?.type) : [];
+            const before = { projectId, title: currentProject?.title || "未命名画布", nodes: nodesRef.current, connections: connectionsRef.current, selectedNodeIds: Array.from(selectedNodeIdsRef.current), viewport: viewportRef.current };
+            const generationOps = safeOps.filter((op): op is Extract<CanvasAgentOp, { type: "run_generation" }> => op.type === "run_generation" && Boolean(op.nodeId));
+            const next = applyCanvasAgentOps(
+                before,
+                safeOps.filter((op) => op.type !== "run_generation"),
+            );
+            nodesRef.current = next.nodes;
+            connectionsRef.current = next.connections;
+            selectedNodeIdsRef.current = new Set(next.selectedNodeIds);
+            viewportRef.current = next.viewport;
+            setAgentUndoSnapshot(before);
+            setNodes(next.nodes);
+            setConnections(next.connections);
+            setSelectedNodeIds(new Set(next.selectedNodeIds));
+            setSelectedConnectionId(null);
+            setViewport(next.viewport);
+            setContextMenu(null);
+            if (generationOps.length) {
+                queueMicrotask(() =>
+                    generationOps.forEach((op) => {
+                        const target = nodesRef.current.find((node) => node.id === op.nodeId);
+                        const prompt = op.prompt?.trim() ? op.prompt : (target?.metadata?.composerContent ?? target?.metadata?.prompt ?? "");
+                        void generateNodeRef.current?.(op.nodeId, op.mode || target?.metadata?.generationMode || "image", prompt);
+                    }),
+                );
+            }
+            return { ...next, projectId, title: currentProject?.title || "未命名画布" };
+        },
+        [currentProject?.title, projectId],
+    );
+    const undoAgentOps = useCallback(() => {
+        if (!agentUndoSnapshot) return null;
+        nodesRef.current = agentUndoSnapshot.nodes;
+        connectionsRef.current = agentUndoSnapshot.connections;
+        selectedNodeIdsRef.current = new Set(agentUndoSnapshot.selectedNodeIds);
+        viewportRef.current = agentUndoSnapshot.viewport;
+        setNodes(agentUndoSnapshot.nodes);
+        setConnections(agentUndoSnapshot.connections);
+        setSelectedNodeIds(new Set(agentUndoSnapshot.selectedNodeIds));
+        setSelectedConnectionId(null);
+        setViewport(agentUndoSnapshot.viewport);
+        setContextMenu(null);
+        setAgentUndoSnapshot(null);
+        return { ...agentUndoSnapshot, projectId, title: currentProject?.title || "未命名画布" };
+    }, [agentUndoSnapshot, currentProject?.title, projectId]);
 
-    const { pluginHost, renderPluginPanel, buildNodeToolbarItems } = usePluginHost({
-        effectiveConfig,
-        isAiConfigReady,
-        openConfigDialog,
-        theme,
-        nodesRef,
-        connectionsRef,
-        viewportRef,
-        setNodes,
-        setDialogNodeId,
-        applyAgentOps,
-    });
+    useEffect(() => {
+        setAgentCanvasContext({ snapshot: agentSnapshot, applyOps: applyAgentOps, undoOps: undoAgentOps, canUndo: Boolean(agentUndoSnapshot) });
+        return () => setAgentCanvasContext(null);
+    }, [agentSnapshot, applyAgentOps, agentUndoSnapshot, setAgentCanvasContext, undoAgentOps]);
+
+    const pluginAi = useMemo<CanvasPluginAi>(() => {
+        const toReferences = (refs?: string[]): ReferenceImage[] => (refs || []).filter(Boolean).map((src, index) => ({ id: `plugin-ref-${index}`, name: `ref-${index}.png`, type: "image/png", dataUrl: src }));
+        const ensureReady = (requestConfig: AiConfig) => {
+            if (!isAiConfigReady(requestConfig, requestConfig.model)) {
+                openConfigDialog(true);
+                throw new Error("AI 配置未就绪，请先在设置里配置模型与密钥");
+            }
+        };
+
+        return {
+            generateImage: async (prompt, options) => {
+                const requestConfig = {
+                    ...buildGenerationConfig(effectiveConfig, undefined, "image"),
+                    count: String(options?.count || 1),
+                    ...(options?.model ? { model: options.model } : {}),
+                    ...(options?.size ? { size: options.size } : {}),
+                };
+                ensureReady(requestConfig);
+                const references = toReferences(options?.references);
+                const items = references.length ? await requestEdit(requestConfig, prompt, references, undefined, { signal: options?.signal }) : await requestGeneration(requestConfig, prompt, { signal: options?.signal });
+                return { images: items.map((item) => item.dataUrl) };
+            },
+            generateVideo: async (prompt, options) => {
+                const requestConfig = {
+                    ...buildGenerationConfig(effectiveConfig, undefined, "video"),
+                    ...(options?.model ? { model: options.model } : {}),
+                    ...(options?.size ? { size: options.size } : {}),
+                    ...(options?.seconds ? { videoSeconds: options.seconds } : {}),
+                };
+                ensureReady(requestConfig);
+                const file = await storeGeneratedVideo(await requestVideoGeneration(requestConfig, prompt, toReferences(options?.references), [], [], { signal: options?.signal }));
+                return { url: file.url, mimeType: file.mimeType, width: file.width, height: file.height, durationMs: file.durationMs };
+            },
+            generateText: async (prompt, options) => {
+                const requestConfig = {
+                    ...buildGenerationConfig(effectiveConfig, undefined, "text"),
+                    ...(options?.model ? { model: options.model } : {}),
+                };
+                ensureReady(requestConfig);
+                const text = await requestImageQuestion(
+                    requestConfig,
+                    [...(options?.system ? [{ role: "system" as const, content: options.system }] : []), { role: "user" as const, content: prompt }],
+                    (delta) => options?.onDelta?.(delta),
+                    { signal: options?.signal },
+                );
+                return { text };
+            },
+            listModels: (capability) => selectableModelsByCapability(effectiveConfig, capability as ModelCapability | undefined).map((value) => ({ value, label: decodeChannelModel(value)?.model || value })),
+            defaultModel: (capability) => buildGenerationConfig(effectiveConfig, undefined, capability).model,
+        };
+    }, [effectiveConfig, isAiConfigReady, openConfigDialog]);
+
+    // 提供给插件节点的宿主能力(节点无关,方法接收 nodeId)
+    const pluginHost = useMemo<CanvasPluginHost>(
+        () => ({
+            getNode: (id) => nodesRef.current.find((node) => node.id === id) || null,
+            getNodes: () => nodesRef.current,
+            getConnections: () => connectionsRef.current,
+            getUpstream: (nodeId) =>
+                connectionsRef.current
+                    .filter((conn) => conn.toNodeId === nodeId)
+                    .map((conn) => nodesRef.current.find((node) => node.id === conn.fromNodeId))
+                    .filter((node): node is CanvasNodeData => Boolean(node)),
+            getDownstream: (nodeId) =>
+                connectionsRef.current
+                    .filter((conn) => conn.fromNodeId === nodeId)
+                    .map((conn) => nodesRef.current.find((node) => node.id === conn.toNodeId))
+                    .filter((node): node is CanvasNodeData => Boolean(node)),
+            updateNode: (nodeId, patch) => setNodes((prev) => prev.map((node) => (node.id === nodeId ? { ...node, ...patch } : node))),
+            updateMetadata: (nodeId, patch) => setNodes((prev) => prev.map((node) => (node.id === nodeId ? { ...node, metadata: { ...node.metadata, ...patch } } : node))),
+            applyOps: (ops) => applyAgentOps(ops),
+            ai: pluginAi,
+            openPanel: (nodeId) => setDialogNodeId(nodeId),
+            closePanel: () => setDialogNodeId(null),
+        }),
+        [applyAgentOps, pluginAi],
+    );
+
+    const renderPluginPanel = useCallback(
+        (panelNode: CanvasNodeData) => {
+            const Panel = getNodeDefinition(panelNode.type)?.Panel;
+            if (!Panel) return null;
+            const ctx = buildNodeContext(pluginHost, panelNode, theme, viewportRef.current.k);
+            return <Panel ctx={ctx} onClose={() => setDialogNodeId(null)} />;
+        },
+        [pluginHost, theme],
+    );
+
+    // 启动时加载已安装的远程插件
+    useEffect(() => {
+        void ensurePluginsLoaded();
+    }, []);
     const createNode = useCallback(
         (type: CanvasNodeTypeId, position?: Position) => {
             const targetPosition = position || getCanvasCenter();
@@ -697,17 +1060,7 @@ function InfiniteCanvasPage() {
             setSelectedNodeIds(new Set([newNode.id]));
             setSelectedConnectionId(null);
             const definition = getNodeDefinition(type);
-            // 纯展示型插件节点(hidePanel)不弹面板;插件自定义 Panel 需显式 autoOpenPanel 才在新建时打开;
-            // 声明了 useBuiltinPanel 的插件节点复用内置生成面板,新建即打开(与图片节点一致);
-            // 内置的图片/视频/配置类节点保持原有「新建即打开生图面板」行为。
-            const wantsPanel = definition?.hidePanel
-                ? false
-                : definition?.Panel
-                  ? Boolean(definition.autoOpenPanel)
-                  : definition?.useBuiltinPanel
-                    ? true
-                    : isBuiltinType(type) && type !== CanvasNodeType.Text && type !== CanvasNodeType.Audio && type !== CanvasNodeType.Group;
-            if (wantsPanel) setDialogNodeId(newNode.id);
+            if (definition?.Panel || (isBuiltinType(type) && type !== CanvasNodeType.Text && type !== CanvasNodeType.Audio && type !== CanvasNodeType.Group)) setDialogNodeId(newNode.id);
         },
         [effectiveConfig.canvasImageCount, effectiveConfig.count, effectiveConfig.imageModel, effectiveConfig.model, effectiveConfig.size, getCanvasCenter],
     );
@@ -903,29 +1256,13 @@ function InfiniteCanvasPage() {
             const worldX = node.position.x + node.width / 2;
             const worldY = node.position.y + node.height / 2;
             const k = Math.min(Math.max(Math.min((size.width * 0.6) / node.width, (size.height * 0.6) / node.height), 0.05), 1.5);
-            const target = { x: size.width / 2 - worldX * k, y: size.height / 2 - worldY * k, k };
+            setViewport({ x: size.width / 2 - worldX * k, y: size.height / 2 - worldY * k, k });
             setSelectedNodeIds(new Set([nodeId]));
             setSelectedConnectionId(null);
             setContextMenu(null);
-
-            if (focusAnimRef.current) cancelAnimationFrame(focusAnimRef.current);
-            const start = { ...viewportRef.current };
-            const duration = 450;
-            const easeOutCubic = (t: number) => 1 - Math.pow(1 - t, 3);
-            let startTime: number | null = null;
-            const step = (now: number) => {
-                if (startTime === null) startTime = now;
-                const progress = Math.min((now - startTime) / duration, 1);
-                const t = easeOutCubic(progress);
-                setViewport({ x: start.x + (target.x - start.x) * t, y: start.y + (target.y - start.y) * t, k: start.k + (target.k - start.k) * t });
-                focusAnimRef.current = progress < 1 ? requestAnimationFrame(step) : null;
-            };
-            focusAnimRef.current = requestAnimationFrame(step);
         },
         [size.height, size.width],
     );
-
-    useEffect(() => () => void (focusAnimRef.current && cancelAnimationFrame(focusAnimRef.current)), []);
 
     const setZoomScale = useCallback(
         (scale: number) => {
@@ -989,21 +1326,6 @@ function InfiniteCanvasPage() {
         navigate("/canvas");
     }, [cleanupAssetImages, deleteProjects, navigate, projectId]);
 
-    const exportCurrentProject = useCallback(async () => {
-        const project = useCanvasStore.getState().projects.find((item) => item.id === projectId);
-        if (!project) return message.error("未找到当前画布");
-        const hide = message.loading("正在导出当前画布…", 0);
-        try {
-            await exportCanvasProjects([project], project.title || "无限画布");
-            message.success("已导出当前画布");
-        } catch (error) {
-            console.error(error);
-            message.error("导出失败，请重试");
-        } finally {
-            hide();
-        }
-    }, [message, projectId]);
-
     const handleCanvasMouseDown = useCallback(
         (event: ReactPointerEvent<HTMLDivElement>) => {
             setContextMenu(null);
@@ -1038,45 +1360,30 @@ function InfiniteCanvasPage() {
         [cancelPendingConnectionCreate, screenToCanvas],
     );
 
-    // 仅处理「选中」的纯逻辑,供 body 冒泡拖拽入口与外层 capture 入口共用。
-    // 返回本次点击后的单选目标 id(多选/取消时为 null),用于同步工具条。
-    const selectNodeByEvent = useCallback((event: Pick<ReactMouseEvent, "shiftKey" | "metaKey" | "ctrlKey">, nodeId: string) => {
-        const nextSelected = new Set(selectedNodeIdsRef.current);
+    const handleNodeMouseDown = useCallback((event: ReactMouseEvent, nodeId: string) => {
+        event.stopPropagation();
+        setContextMenu(null);
+        setHoveredNodeId(null);
+        setToolbarNodeId(null);
+        setSelectedConnectionId(null);
+
+        const currentSelected = selectedNodeIdsRef.current;
+        const currentNodes = nodesRef.current;
+        const nextSelected = new Set(currentSelected);
+
         if (event.shiftKey || event.metaKey || event.ctrlKey) {
-            if (nextSelected.has(nodeId)) nextSelected.delete(nodeId);
-            else nextSelected.add(nodeId);
+            if (nextSelected.has(nodeId)) {
+                nextSelected.delete(nodeId);
+            } else {
+                nextSelected.add(nodeId);
+            }
         } else if (!nextSelected.has(nodeId)) {
             nextSelected.clear();
             nextSelected.add(nodeId);
         }
+
         setSelectedNodeIds(nextSelected);
-        const soloId = nextSelected.size === 1 && nextSelected.has(nodeId) ? nodeId : null;
-        setToolbarNodeId(soloId);
-        return { nextSelected, soloId };
-    }, []);
-
-    // capture 阶段选中:点击节点内部任意元素(含吞掉 mousedown 的 textarea/iframe)都能选中并弹出工具条。
-    // 只做选中,不启动拖拽 —— 拖拽仍由 body 的 onMouseDown(冒泡)负责,故编辑器内选词不会拖动节点。
-    // capture 必先于同一次事件的 body 冒泡触发,故把算好的选中集暂存,供紧随其后的拖拽入口复用,避免二次选中(shift 反选被抵消)。
-    const pendingSelectionRef = useRef<Set<string> | null>(null);
-    const handleNodeSelectCapture = useCallback(
-        (event: ReactMouseEvent, nodeId: string) => {
-            if (event.button !== 0) return;
-            setContextMenu(null);
-            setHoveredNodeId(null);
-            setSelectedConnectionId(null);
-            const { nextSelected } = selectNodeByEvent(event, nodeId);
-            pendingSelectionRef.current = nextSelected;
-        },
-        [selectNodeByEvent],
-    );
-
-    const handleNodeMouseDown = useCallback((event: ReactMouseEvent, nodeId: string) => {
-        event.stopPropagation();
-        // 选中已由 capture 阶段完成;这里只负责建立拖拽。若因故没走 capture,则兜底再选一次。
-        const currentNodes = nodesRef.current;
-        const nextSelected = pendingSelectionRef.current ?? selectNodeByEvent(event, nodeId).nextSelected;
-        pendingSelectionRef.current = null;
+        setToolbarNodeId(nextSelected.size === 1 && nextSelected.has(nodeId) ? nodeId : null);
         const dragIds = new Set(nextSelected);
         currentNodes.forEach((node) => {
             if (!nextSelected.has(node.id)) return;
@@ -1140,11 +1447,7 @@ function InfiniteCanvasPage() {
         dragRef.current.initialSelectedNodes = [];
         if (wasClick && clickedNodeId) {
             const clickedNode = nodesRef.current.find((node) => node.id === clickedNodeId);
-            const clickedDefinition = clickedNode ? getNodeDefinition(clickedNode.type) : undefined;
             if (clickedNode?.type === CanvasNodeType.Text) {
-                setDialogNodeId((current) => (current === clickedNodeId ? current : null));
-            } else if (clickedDefinition?.hidePanel) {
-                // 纯展示型插件节点:单击只选中,不弹下方面板
                 setDialogNodeId((current) => (current === clickedNodeId ? current : null));
             } else if (clickedNode?.type !== CanvasNodeType.Group) {
                 setDialogNodeId(clickedNodeId);
@@ -1458,7 +1761,7 @@ function InfiniteCanvasPage() {
     );
 
     const handleNodeResize = useCallback((nodeId: string, width: number, height: number, position?: Position) => {
-        setNodes((prev) => prev.map((node) => (node.id === nodeId ? { ...node, width, height, position: position || node.position } : node)));
+        setNodes((prev) => prev.map((node) => (node.id === nodeId ? normalizeStoryboardImageNodeSize({ ...node, width, height, position: position || node.position }) : node)));
     }, []);
 
     const toggleNodeFreeResize = useCallback((nodeId: string) => {
@@ -1986,47 +2289,6 @@ function InfiniteCanvasPage() {
                 return;
             }
 
-            // 插件节点声明了 useBuiltinPanel.writeBackToSelf:复用内置面板生成,但结果写回节点自身。
-            // 目前支持 image 模式(全景等展示型节点),前缀由 useBuiltinPanel.promptPrefix 指定。
-            const builtinPanel = sourceNode ? getNodeDefinition(sourceNode.type)?.useBuiltinPanel : undefined;
-            if (sourceNode && builtinPanel?.writeBackToSelf && builtinPanel.mode === "image") {
-                const scene = prompt.trim();
-                if (!scene) return;
-                setRunningNodeId(nodeId);
-                const controller = startGenerationRequest(nodeId, nodeId, nodeId);
-                setNodes((prev) => prev.map((node) => (node.id === nodeId ? { ...node, metadata: { ...node.metadata, prompt: scene, status: NODE_STATUS_LOADING, errorDetails: undefined } } : node)));
-                try {
-                    const fullPrompt = (builtinPanel.promptPrefix || "") + scene;
-                    // 上游图片节点作为参考图(图生图);无上游则纯文生图
-                    const upstreamNodes = connectionsRef.current
-                        .filter((conn) => conn.toNodeId === nodeId)
-                        .map((conn) => nodesRef.current.find((node) => node.id === conn.fromNodeId))
-                        .filter((node): node is CanvasNodeData => Boolean(node));
-                    const refs = upstreamNodes.flatMap((up) =>
-                        typeof up.metadata?.content === "string" && up.metadata.content && up.type !== sourceNode.type
-                            ? [{ id: up.id, name: `${up.title || up.id}.png`, type: up.metadata.mimeType || "image/png", dataUrl: up.metadata.content, storageKey: up.metadata.storageKey }]
-                            : [],
-                    );
-                    const image = refs.length
-                        ? await requestEdit({ ...generationConfig, count: "1" }, fullPrompt, refs, undefined, { signal: controller.signal }).then((items) => items[0])
-                        : await requestGeneration({ ...generationConfig, count: "1" }, fullPrompt, { signal: controller.signal }).then((items) => items[0]);
-                    const uploaded = await uploadImage(image.dataUrl);
-                    setNodes((prev) =>
-                        prev.map((node) => (node.id === nodeId ? { ...node, metadata: { ...node.metadata, ...imageMetadata(uploaded), prompt: scene, model: generationConfig.model, status: NODE_STATUS_SUCCESS, errorDetails: undefined } } : node)),
-                    );
-                    setDialogNodeId(null);
-                } catch (error) {
-                    if (!isGenerationCanceled(error)) {
-                        const errorDetails = error instanceof Error ? error.message : "生成失败";
-                        message.error(errorDetails);
-                        setNodes((prev) => prev.map((node) => (node.id === nodeId ? { ...node, metadata: { ...node.metadata, status: NODE_STATUS_ERROR, errorDetails } } : node)));
-                    }
-                } finally {
-                    finishGenerationRequest(nodeId, controller);
-                }
-                return;
-            }
-
             setRunningNodeId(nodeId);
             const runController = startGenerationRequest(nodeId, nodeId, nodeId);
             const sourceTextContent = sourceNode?.type === CanvasNodeType.Text ? sourceNode.metadata?.content?.trim() || "" : "";
@@ -2388,12 +2650,1178 @@ function InfiniteCanvasPage() {
         },
         [effectiveConfig, finishGenerationRequest, isAiConfigReady, message, openConfigDialog, startGenerationRequest],
     );
+
+    const handleAnalyzeVideoNode = useCallback(
+        async (nodeId: string, instruction: string) => {
+            const sourceNode = nodesRef.current.find((node) => node.id === nodeId);
+            if (!sourceNode || sourceNode.type !== CanvasNodeType.Video || !sourceNode.metadata?.content) {
+                message.warning("请先上传需要拆解的对标视频");
+                return;
+            }
+
+            const analysisConfig = buildGenerationConfig(effectiveConfig, undefined, "text");
+            analysisConfig.model = sourceNode.metadata.analysisModel || analysisConfig.model;
+            if (!isAiConfigReady(analysisConfig, analysisConfig.model)) {
+                openConfigDialog(true);
+                return;
+            }
+
+            setRunningNodeId(nodeId);
+            const controller = startGenerationRequest(nodeId, nodeId, nodeId);
+            try {
+                const referenceVideo: ReferenceVideo = {
+                    id: sourceNode.id,
+                    name: `${sourceNode.title || "对标视频"}.mp4`,
+                    type: sourceNode.metadata.mimeType || "video/mp4",
+                    url: sourceNode.metadata.content,
+                    storageKey: sourceNode.metadata.storageKey,
+                    bytes: sourceNode.metadata.bytes,
+                    width: sourceNode.metadata.naturalWidth,
+                    height: sourceNode.metadata.naturalHeight,
+                    durationMs: sourceNode.metadata.durationMs,
+                };
+                const frames = await extractVideoFrames(referenceVideo, 8, controller.signal);
+                const analysis = await requestImageQuestion(analysisConfig, buildReferenceVideoAnalysisMessages(referenceVideo, frames, instruction), () => undefined, { signal: controller.signal });
+                if (!analysis.trim()) throw new Error("文本模型没有返回拆解结果");
+
+                const resultWidth = 520;
+                const resultHeight = 440;
+                const resultNode: CanvasNodeData = {
+                    ...createCanvasNode(CanvasNodeType.Text, { x: 0, y: 0 }),
+                    title: "对标视频拆解",
+                    position: {
+                        x: sourceNode.position.x + sourceNode.width + 96,
+                        y: sourceNode.position.y + sourceNode.height / 2 - resultHeight / 2,
+                    },
+                    width: resultWidth,
+                    height: resultHeight,
+                    metadata: {
+                        content: analysis,
+                        prompt: instruction,
+                        status: NODE_STATUS_SUCCESS,
+                        fontSize: 13,
+                        model: analysisConfig.model,
+                        references: [sourceNode.metadata.storageKey || sourceNode.metadata.content],
+                        workflowKind: "reference-analysis",
+                        workflowParentId: sourceNode.id,
+                    },
+                };
+                setNodes((prev) => [...prev, resultNode]);
+                setConnections((prev) => [...prev, { id: nanoid(), fromNodeId: sourceNode.id, toNodeId: resultNode.id }]);
+                setSelectedNodeIds(new Set([resultNode.id]));
+                setSelectedConnectionId(null);
+                setDialogNodeId(null);
+                message.success("对标视频拆解完成");
+            } catch (error) {
+                if (!isGenerationCanceled(error)) message.error(error instanceof Error ? error.message : "对标视频拆解失败");
+            } finally {
+                finishGenerationRequest(nodeId, controller);
+                setRunningNodeId(null);
+            }
+        },
+        [effectiveConfig, finishGenerationRequest, isAiConfigReady, message, openConfigDialog, startGenerationRequest],
+    );
+
+    const handleCreateProductHooks = useCallback(
+        async (sourceNodeId: string, brief: EcommerceProductBrief, files: File[]) => {
+            const sourceNode = nodesRef.current.find((node) => node.id === sourceNodeId);
+            const analysis = sourceNode?.metadata?.content?.trim();
+            if (!sourceNode || !analysis || workflowKindOf(sourceNode) !== "reference-analysis") {
+                message.error("找不到可用的对标视频拆解结果");
+                return;
+            }
+
+            const textConfig = buildGenerationConfig(effectiveConfig, undefined, "text");
+            textConfig.model = sourceNode.metadata?.model || textConfig.model;
+            if (!isAiConfigReady(textConfig, textConfig.model)) {
+                openConfigDialog(true);
+                return;
+            }
+
+            setRunningNodeId(sourceNodeId);
+            let hookNodeId: string | null = null;
+            try {
+                const uploaded = await Promise.all(files.map((file) => uploadImage(file)));
+                const productReferences: EcommerceProductReference[] = uploaded.map((image, index) => ({
+                    id: nanoid(),
+                    name: files[index]?.name || `product-${index + 1}.png`,
+                    url: image.url,
+                    storageKey: image.storageKey,
+                    mimeType: image.mimeType,
+                }));
+                const productContent = buildProductBriefMarkdown(brief, productReferences.length);
+                const productWidth = 440;
+                const productHeight = 460;
+                const hookWidth = 560;
+                const hookHeight = 560;
+                const productNode: CanvasNodeData = {
+                    ...createCanvasNode(CanvasNodeType.Text, { x: 0, y: 0 }),
+                    title: `产品资料 · ${brief.productName}`,
+                    position: {
+                        x: sourceNode.position.x + sourceNode.width + 96,
+                        y: sourceNode.position.y + sourceNode.height / 2 - productHeight / 2,
+                    },
+                    width: productWidth,
+                    height: productHeight,
+                    metadata: {
+                        content: productContent,
+                        status: NODE_STATUS_SUCCESS,
+                        fontSize: 13,
+                        workflowKind: "product-brief",
+                        workflowParentId: sourceNode.id,
+                        referenceAnalysisNodeId: sourceNode.id,
+                        productBrief: brief,
+                        productReferenceImages: productReferences,
+                    },
+                };
+                const hookNode: CanvasNodeData = {
+                    ...createCanvasNode(CanvasNodeType.Text, { x: 0, y: 0 }),
+                    title: "创意钩子方案",
+                    position: {
+                        x: productNode.position.x + productNode.width + 96,
+                        y: productNode.position.y + productNode.height / 2 - hookHeight / 2,
+                    },
+                    width: hookWidth,
+                    height: hookHeight,
+                    metadata: {
+                        content: "",
+                        status: NODE_STATUS_LOADING,
+                        fontSize: 13,
+                        model: textConfig.model,
+                        workflowKind: "hook-options",
+                        workflowParentId: productNode.id,
+                        referenceAnalysisNodeId: sourceNode.id,
+                        productBriefNodeId: productNode.id,
+                    },
+                };
+                hookNodeId = hookNode.id;
+                const nextConnections = [
+                    { id: nanoid(), fromNodeId: sourceNode.id, toNodeId: productNode.id },
+                    { id: nanoid(), fromNodeId: productNode.id, toNodeId: hookNode.id },
+                ];
+                setNodes((prev) => [...prev.map((node) => (node.id === sourceNode.id ? { ...node, metadata: { ...node.metadata, workflowKind: "reference-analysis" as const } } : node)), productNode, hookNode]);
+                setConnections((prev) => [...prev, ...nextConnections]);
+                setSelectedNodeIds(new Set([hookNode.id]));
+                setSelectedConnectionId(null);
+                setProductScriptSourceNodeId(null);
+
+                const controller = startGenerationRequest(hookNode.id, sourceNode.id, sourceNode.id);
+                try {
+                    const references = await resolveProductReferenceImages(productNode);
+                    const response = await requestImageQuestion(textConfig, buildHookOptionsMessages(analysis, productContent, references), () => undefined, { signal: controller.signal });
+                    const options = parseHookOptionsResponse(response);
+                    setNodes((prev) =>
+                        prev.map((node) =>
+                            node.id === hookNode.id
+                                ? {
+                                      ...node,
+                                      metadata: {
+                                          ...node.metadata,
+                                          content: formatHookOptionsMarkdown(options),
+                                          hookOptions: options,
+                                          selectedHookId: undefined,
+                                          prompt: "根据对标结构和产品资料生成3个可见事件钩子",
+                                          status: NODE_STATUS_SUCCESS,
+                                          errorDetails: undefined,
+                                      },
+                                  }
+                                : node,
+                        ),
+                    );
+                    setHookSelectionNodeId(hookNode.id);
+                    message.success("已生成 3 个剧情钩子，请先选择一个");
+                } finally {
+                    finishGenerationRequest(hookNode.id, controller);
+                }
+            } catch (error) {
+                if (!isGenerationCanceled(error)) {
+                    const errorDetails = error instanceof Error ? error.message : "创意钩子生成失败";
+                    message.error(errorDetails);
+                    if (hookNodeId) setNodes((prev) => prev.map((node) => (node.id === hookNodeId ? { ...node, metadata: { ...node.metadata, status: NODE_STATUS_ERROR, errorDetails } } : node)));
+                }
+            } finally {
+                setRunningNodeId(null);
+            }
+        },
+        [effectiveConfig, finishGenerationRequest, isAiConfigReady, message, openConfigDialog, startGenerationRequest],
+    );
+
+    const handleRegenerateHookOptions = useCallback(
+        async (hookNode: CanvasNodeData) => {
+            const productNode = nodesRef.current.find((node) => node.id === hookNode.metadata?.productBriefNodeId);
+            const sourceNode = nodesRef.current.find((node) => node.id === hookNode.metadata?.referenceAnalysisNodeId);
+            const productContent = productNode?.metadata?.content?.trim();
+            const analysis = sourceNode?.metadata?.content?.trim();
+            if (!productNode || !productContent || !sourceNode || !analysis) {
+                message.warning("对标拆解或产品资料不完整，无法重新生成钩子");
+                return;
+            }
+
+            const textConfig = buildGenerationConfig(effectiveConfig, undefined, "text");
+            textConfig.model = hookNode.metadata?.model || textConfig.model;
+            if (!isAiConfigReady(textConfig, textConfig.model)) {
+                openConfigDialog(true);
+                return;
+            }
+
+            setRunningNodeId(hookNode.id);
+            setNodes((prev) => prev.map((node) => (node.id === hookNode.id ? { ...node, metadata: { ...node.metadata, status: NODE_STATUS_LOADING, errorDetails: undefined, selectedHookId: undefined } } : node)));
+            const controller = startGenerationRequest(hookNode.id, hookNode.id, hookNode.id);
+            try {
+                const references = await resolveProductReferenceImages(productNode);
+                const response = await requestImageQuestion(textConfig, buildHookOptionsMessages(analysis, productContent, references), () => undefined, { signal: controller.signal });
+                const options = parseHookOptionsResponse(response);
+                setNodes((prev) =>
+                    prev.map((node) =>
+                        node.id === hookNode.id
+                            ? {
+                                  ...node,
+                                  metadata: {
+                                      ...node.metadata,
+                                      content: formatHookOptionsMarkdown(options),
+                                      hookOptions: options,
+                                      selectedHookId: undefined,
+                                      prompt: "根据对标结构和产品资料生成3个可见事件钩子",
+                                      status: NODE_STATUS_SUCCESS,
+                                      errorDetails: undefined,
+                                  },
+                              }
+                            : node,
+                    ),
+                );
+                setHookSelectionNodeId(hookNode.id);
+                message.success("已重新生成 3 个剧情钩子");
+            } catch (error) {
+                if (!isGenerationCanceled(error)) {
+                    const errorDetails = error instanceof Error ? error.message : "创意钩子生成失败";
+                    message.error(errorDetails);
+                    setNodes((prev) => prev.map((node) => (node.id === hookNode.id ? { ...node, metadata: { ...node.metadata, status: NODE_STATUS_ERROR, errorDetails } } : node)));
+                }
+            } finally {
+                finishGenerationRequest(hookNode.id, controller);
+                setRunningNodeId(null);
+            }
+        },
+        [effectiveConfig, finishGenerationRequest, isAiConfigReady, message, openConfigDialog, startGenerationRequest],
+    );
+
+    const handleCreateScriptFromHook = useCallback(
+        async (hookNode: CanvasNodeData, selectedHook: EcommerceHookOption) => {
+            const productNode = nodesRef.current.find((node) => node.id === hookNode.metadata?.productBriefNodeId);
+            const sourceNode = nodesRef.current.find((node) => node.id === hookNode.metadata?.referenceAnalysisNodeId);
+            const productContent = productNode?.metadata?.content?.trim();
+            const analysis = sourceNode?.metadata?.content?.trim();
+            if (!productNode || !productContent || !sourceNode || !analysis) {
+                message.warning("对标拆解或产品资料不完整，无法生成完整剧本");
+                return;
+            }
+
+            const textConfig = buildGenerationConfig(effectiveConfig, undefined, "text");
+            textConfig.model = hookNode.metadata?.model || textConfig.model;
+            if (!isAiConfigReady(textConfig, textConfig.model)) {
+                openConfigDialog(true);
+                return;
+            }
+
+            const scriptWidth = 560;
+            const scriptHeight = 540;
+            const siblingCount = nodesRef.current.filter((node) => node.metadata?.workflowParentId === hookNode.id && workflowKindOf(node) === "sales-script").length;
+            const scriptNode: CanvasNodeData = {
+                ...createCanvasNode(CanvasNodeType.Text, { x: 0, y: 0 }),
+                title: `产品带货剧本 · ${selectedHook.id}`,
+                position: {
+                    x: hookNode.position.x + hookNode.width + 96,
+                    y: hookNode.position.y + hookNode.height / 2 - scriptHeight / 2 + siblingCount * 72,
+                },
+                width: scriptWidth,
+                height: scriptHeight,
+                metadata: {
+                    content: "",
+                    status: NODE_STATUS_LOADING,
+                    fontSize: 13,
+                    model: textConfig.model,
+                    workflowKind: "sales-script",
+                    workflowParentId: hookNode.id,
+                    referenceAnalysisNodeId: sourceNode.id,
+                    productBriefNodeId: productNode.id,
+                    hookOptionsNodeId: hookNode.id,
+                    selectedHookId: selectedHook.id,
+                    hookOption: selectedHook,
+                },
+            };
+
+            setNodes((prev) => [...prev.map((node) => (node.id === hookNode.id ? { ...node, metadata: { ...node.metadata, selectedHookId: selectedHook.id } } : node)), scriptNode]);
+            setConnections((prev) => [...prev, { id: nanoid(), fromNodeId: hookNode.id, toNodeId: scriptNode.id }]);
+            setSelectedNodeIds(new Set([scriptNode.id]));
+            setSelectedConnectionId(null);
+            setHookSelectionNodeId(null);
+            setRunningNodeId(hookNode.id);
+            const controller = startGenerationRequest(scriptNode.id, hookNode.id, hookNode.id);
+
+            try {
+                const references = await resolveProductReferenceImages(productNode);
+                let streamed = "";
+                const script = await requestImageQuestion(
+                    textConfig,
+                    buildSalesScriptMessages(analysis, productContent, selectedHook, references),
+                    (text) => {
+                        streamed = text;
+                        setNodes((prev) => prev.map((node) => (node.id === scriptNode.id ? { ...node, metadata: { ...node.metadata, content: text, status: NODE_STATUS_LOADING } } : node)));
+                    },
+                    { signal: controller.signal },
+                );
+                const finalScript = validateSalesScriptResponse(script || streamed);
+                setNodes((prev) =>
+                    prev.map((node) =>
+                        node.id === scriptNode.id
+                            ? {
+                                  ...node,
+                                  metadata: {
+                                      ...node.metadata,
+                                      content: finalScript,
+                                      prompt: `按钩子 ${selectedHook.id}「${selectedHook.title}」生成完整带货剧本`,
+                                      status: NODE_STATUS_SUCCESS,
+                                      errorDetails: undefined,
+                                  },
+                              }
+                            : node,
+                    ),
+                );
+                message.success(`已按钩子 ${selectedHook.id} 生成完整剧本`);
+            } catch (error) {
+                if (!isGenerationCanceled(error)) {
+                    const errorDetails = error instanceof Error ? error.message : "产品带货剧本生成失败";
+                    message.error(errorDetails);
+                    setNodes((prev) => prev.map((node) => (node.id === scriptNode.id ? { ...node, metadata: { ...node.metadata, status: NODE_STATUS_ERROR, errorDetails } } : node)));
+                }
+            } finally {
+                finishGenerationRequest(scriptNode.id, controller);
+                setRunningNodeId(null);
+            }
+        },
+        [effectiveConfig, finishGenerationRequest, isAiConfigReady, message, openConfigDialog, startGenerationRequest],
+    );
+
+    const handleSplitStoryboard = useCallback(
+        async (scriptNode: CanvasNodeData) => {
+            const script = scriptNode.metadata?.content?.trim();
+            const productNode = nodesRef.current.find((node) => node.id === scriptNode.metadata?.productBriefNodeId);
+            const productContent = productNode?.metadata?.content?.trim();
+            if (!script || !productNode || !productContent) {
+                message.warning("剧本或产品资料不完整，无法拆分分镜");
+                return;
+            }
+
+            const textConfig = buildGenerationConfig(effectiveConfig, undefined, "text");
+            textConfig.model = scriptNode.metadata?.model || textConfig.model;
+            if (!isAiConfigReady(textConfig, textConfig.model)) {
+                openConfigDialog(true);
+                return;
+            }
+
+            const storyboardWidth = 560;
+            const storyboardHeight = 560;
+            const storyboardNode: CanvasNodeData = {
+                ...createCanvasNode(CanvasNodeType.Text, { x: 0, y: 0 }),
+                title: "结构化分镜",
+                position: {
+                    x: scriptNode.position.x + scriptNode.width + 96,
+                    y: scriptNode.position.y + scriptNode.height / 2 - storyboardHeight / 2,
+                },
+                width: storyboardWidth,
+                height: storyboardHeight,
+                metadata: {
+                    content: "",
+                    status: NODE_STATUS_LOADING,
+                    fontSize: 13,
+                    model: textConfig.model,
+                    workflowKind: "storyboard",
+                    workflowParentId: scriptNode.id,
+                    referenceAnalysisNodeId: scriptNode.metadata?.referenceAnalysisNodeId,
+                    productBriefNodeId: productNode.id,
+                },
+            };
+            setNodes((prev) => [...prev, storyboardNode]);
+            setConnections((prev) => [...prev, { id: nanoid(), fromNodeId: scriptNode.id, toNodeId: storyboardNode.id }]);
+            setSelectedNodeIds(new Set([storyboardNode.id]));
+            setSelectedConnectionId(null);
+            setRunningNodeId(scriptNode.id);
+            const controller = startGenerationRequest(storyboardNode.id, scriptNode.id, scriptNode.id);
+
+            try {
+                const references = await resolveProductReferenceImages(productNode);
+                const shots = await requestStoryboardWithRepair(textConfig, script, productContent, references, controller.signal, () => message.info("首次分镜结构不完整，正在自动修复一次"));
+                setNodes((prev) =>
+                    prev.map((node) =>
+                        node.id === storyboardNode.id
+                            ? {
+                                  ...node,
+                                  metadata: {
+                                      ...node.metadata,
+                                      content: formatStoryboardMarkdown(shots),
+                                      storyboardShots: shots,
+                                      prompt: "将产品带货剧本拆成可执行分镜",
+                                      status: NODE_STATUS_SUCCESS,
+                                  },
+                              }
+                            : node,
+                    ),
+                );
+                message.success(`已拆成 ${shots.length} 个分镜`);
+            } catch (error) {
+                if (!isGenerationCanceled(error)) {
+                    const errorDetails = error instanceof Error ? error.message : "分镜生成失败";
+                    message.error(errorDetails);
+                    setNodes((prev) => prev.map((node) => (node.id === storyboardNode.id ? { ...node, metadata: { ...node.metadata, status: NODE_STATUS_ERROR, errorDetails } } : node)));
+                }
+            } finally {
+                finishGenerationRequest(storyboardNode.id, controller);
+                setRunningNodeId(null);
+            }
+        },
+        [effectiveConfig, finishGenerationRequest, isAiConfigReady, message, openConfigDialog, startGenerationRequest],
+    );
+
+    const handleGenerateStoryboardImages = useCallback(
+        async (storyboardNode: CanvasNodeData) => {
+            const shots = storyboardNode.metadata?.storyboardShots || [];
+            const productNode = nodesRef.current.find((node) => node.id === storyboardNode.metadata?.productBriefNodeId);
+            const productContent = productNode?.metadata?.content?.trim();
+            const scriptNode = nodesRef.current.find((node) => node.id === storyboardNode.metadata?.workflowParentId);
+            const sourceScript = scriptNode?.metadata?.content?.trim();
+            if (!shots.length || !productNode || !productContent || !sourceScript) {
+                message.warning("分镜、原剧本或产品资料不完整，无法生成完整故事板");
+                return;
+            }
+            try {
+                validateStoryboardForGeneration(shots, sourceScript);
+            } catch (error) {
+                const errorDetails = `当前分镜不能用于出图：${error instanceof Error ? error.message : "分镜未通过原剧本忠实度校验"}。请在结构化分镜节点点击“重试”，重新拆分后再生成故事板。`;
+                message.error(errorDetails);
+                setNodes((prev) => prev.map((node) => (node.id === storyboardNode.id ? { ...node, metadata: { ...node.metadata, status: NODE_STATUS_ERROR, errorDetails } } : node)));
+                return;
+            }
+
+            const imageConfig = {
+                ...buildGenerationConfig(effectiveConfig, undefined, "image"),
+                count: "1",
+                size: STORYBOARD_PREVIEW_REQUEST_SIZE,
+                quality: STORYBOARD_PREVIEW_QUALITY,
+            };
+            if (!isAiConfigReady(imageConfig, imageConfig.model)) {
+                openConfigDialog(true);
+                return;
+            }
+            const references = await resolveProductReferenceImages(productNode);
+            if (!references.length) {
+                message.error("产品参考图已丢失，无法生成产品一致的完整故事板");
+                return;
+            }
+            const referenceInputSupported = supportsImageReferenceInput(imageConfig);
+
+            const frameWidth = STORYBOARD_IMAGE_NODE_SIZE.width;
+            const frameHeight = STORYBOARD_IMAGE_NODE_SIZE.height;
+            const frameGap = 48;
+            const existingVersions = nodesRef.current.filter((node) => node.metadata?.storyboardNodeId === storyboardNode.id).map((node) => node.metadata?.storyboardVersion || 0);
+            const storyboardVersion = Math.max(0, ...existingVersions) + 1;
+            const versionOffsetY = (storyboardVersion - 1) * (referenceInputSupported ? frameHeight * 2 + 160 : frameHeight + 112);
+            const chainStartX = storyboardNode.position.x + storyboardNode.width + 96;
+            const chainY = storyboardNode.position.y + storyboardNode.height / 2 - frameHeight / 2 + versionOffsetY;
+            const frameY = referenceInputSupported ? chainY + frameHeight + 96 : chainY;
+            const characterPrompt = buildCharacterReferencePrompt(productContent, shots);
+            const characterNode: CanvasNodeData | null = referenceInputSupported
+                ? {
+                      ...createCanvasNode(CanvasNodeType.Image, { x: 0, y: 0 }),
+                      title: `角色身份参考 · V${storyboardVersion}（非剧情）`,
+                      position: { x: chainStartX, y: chainY },
+                      width: frameWidth,
+                      height: frameHeight,
+                      metadata: {
+                          content: "",
+                          prompt: characterPrompt,
+                          status: NODE_STATUS_LOADING,
+                          workflowKind: "character-reference",
+                          workflowParentId: storyboardNode.id,
+                          storyboardNodeId: storyboardNode.id,
+                          storyboardVersion,
+                          productBriefNodeId: productNode.id,
+                          storyboardImageReviewStatus: "pending",
+                          storyboardDisplaySizeVersion: STORYBOARD_IMAGE_NODE_SIZE_VERSION,
+                          storyboardReferenceInputSupported: true,
+                          storyboardGenerationPhase: "queued",
+                          storyboardGenerationQueuedAt: Date.now(),
+                          ...buildImageGenerationMetadata("generation", imageConfig, 1, []),
+                      },
+                  }
+                : null;
+            const frameNodes = shots.map((shot, index): CanvasNodeData => {
+                const initialProductReferences = referenceInputSupported && shot.productVisible ? references : [];
+                const prompt = buildStoryboardFramePrompt(shot, productContent, initialProductReferences.length, index > 0, referenceInputSupported);
+                return {
+                    ...createCanvasNode(CanvasNodeType.Image, { x: 0, y: 0 }),
+                    title: `故事板 V${storyboardVersion} · ${shot.id}`,
+                    position: {
+                        x: chainStartX + index * (frameWidth + frameGap),
+                        y: frameY,
+                    },
+                    width: frameWidth,
+                    height: frameHeight,
+                    metadata: {
+                        content: "",
+                        prompt,
+                        status: NODE_STATUS_LOADING,
+                        workflowKind: "storyboard-frame",
+                        workflowParentId: storyboardNode.id,
+                        storyboardNodeId: storyboardNode.id,
+                        storyboardVersion,
+                        storyboardFrameIndex: index,
+                        productBriefNodeId: productNode.id,
+                        storyboardShotId: shot.id,
+                        storyboardShotRole: shot.role,
+                        storyboardProductVisible: shot.productVisible,
+                        characterReferenceNodeId: characterNode?.id,
+                        storyboardImageReviewStatus: "pending",
+                        storyboardDisplaySizeVersion: STORYBOARD_IMAGE_NODE_SIZE_VERSION,
+                        storyboardReferenceInputSupported: referenceInputSupported,
+                        storyboardGenerationPhase: "queued",
+                        storyboardGenerationQueuedAt: Date.now(),
+                        ...buildImageGenerationMetadata(referenceInputSupported ? "edit" : "generation", imageConfig, 1, initialProductReferences),
+                    },
+                };
+            });
+            setNodes((prev) => [...prev, ...(characterNode ? [characterNode] : []), ...frameNodes]);
+            setConnections((prev) => [
+                ...prev,
+                ...(characterNode ? [{ id: nanoid(), fromNodeId: storyboardNode.id, toNodeId: characterNode.id }] : []),
+                ...(frameNodes[0] ? [{ id: nanoid(), fromNodeId: storyboardNode.id, toNodeId: frameNodes[0].id }] : []),
+                ...frameNodes
+                    .map((node, index) => ({
+                        id: nanoid(),
+                        fromNodeId: index === 0 ? storyboardNode.id : frameNodes[index - 1].id,
+                        toNodeId: node.id,
+                    }))
+                    .slice(1),
+            ]);
+            setSelectedNodeIds(new Set([...(characterNode ? [characterNode.id] : []), ...frameNodes.map((node) => node.id)]));
+            setSelectedConnectionId(null);
+            setRunningNodeId(storyboardNode.id);
+
+            const targetIds = [...(characterNode ? [characterNode.id] : []), ...frameNodes.map((node) => node.id)];
+            const controller = new AbortController();
+            targetIds.forEach((targetId) => startGenerationRequest(targetId, storyboardNode.id, storyboardNode.id, controller));
+            message.info(
+                referenceInputSupported
+                    ? `将按顺序生成角色基准和 ${frameNodes.length} 张 ${STORYBOARD_PREVIEW_REQUEST_SIZE} 剧情预演图；每次请求至少间隔 ${Math.round(STORYBOARD_IMAGE_MIN_INTERVAL_MS / 1000)} 秒`
+                    : `当前渠道不支持参考图输入，已跳过无效角色基准；将按顺序生成 ${frameNodes.length} 张 ${STORYBOARD_PREVIEW_REQUEST_SIZE} 剧情预演图`,
+            );
+
+            try {
+                let characterReference: ReferenceImage | undefined;
+                if (characterNode) {
+                    try {
+                        const { generated, uploaded } = await storyboardImageRequestQueueRef.current.run(
+                            async ({ attempt, signal }) => {
+                                const generated = await requestGeneration(imageConfig, characterPrompt, { signal }).then((items) => items[0]);
+                                markStoryboardGenerationSaving(characterNode.id, attempt);
+                                const uploaded = await uploadImage(generated.dataUrl);
+                                return { generated, uploaded };
+                            },
+                            {
+                                signal: controller.signal,
+                                onPhase: (event) => updateStoryboardGenerationPhase(characterNode.id, event),
+                            },
+                        );
+                        characterReference = {
+                            id: characterNode.id,
+                            name: `${characterNode.title}.png`,
+                            type: uploaded.mimeType || "image/png",
+                            dataUrl: generated.dataUrl,
+                            url: uploaded.url,
+                            storageKey: uploaded.storageKey,
+                        };
+                        setNodes((prev) =>
+                            prev.map((node) =>
+                                node.id === characterNode.id
+                                    ? {
+                                          ...node,
+                                          width: frameWidth,
+                                          height: frameHeight,
+                                          metadata: {
+                                              ...node.metadata,
+                                              ...imageMetadata(uploaded),
+                                              prompt: characterPrompt,
+                                              storyboardImageReviewStatus: "pending",
+                                              ...buildImageGenerationMetadata("generation", imageConfig, 1, []),
+                                              ...finishStoryboardGenerationMetadata(node.metadata),
+                                          },
+                                      }
+                                    : node,
+                            ),
+                        );
+                    } catch (error) {
+                        if (isGenerationCanceled(error)) return;
+                        const requestError = error instanceof Error ? error.message : "角色基准图生成失败";
+                        const errorDetails = `模型 ${imageConfig.model}：${requestError}`;
+                        setNodes((prev) =>
+                            prev.map((node) =>
+                                node.id === characterNode.id
+                                    ? { ...node, metadata: { ...node.metadata, status: NODE_STATUS_ERROR, errorDetails, ...finishStoryboardGenerationMetadata(node.metadata) } }
+                                    : frameNodes.some((frameNode) => frameNode.id === node.id)
+                                      ? {
+                                            ...node,
+                                            metadata: {
+                                                ...node.metadata,
+                                                status: NODE_STATUS_ERROR,
+                                                errorDetails: "角色基准图生成失败，未执行故事板出图",
+                                                ...finishStoryboardGenerationMetadata(node.metadata),
+                                            },
+                                        }
+                                      : node,
+                            ),
+                        );
+                        message.error(`角色基准图生成失败：${errorDetails}`);
+                        return;
+                    }
+                }
+
+                let completed = 0;
+                let previousReference: ReferenceImage | undefined;
+                let previousFrameNodeId: string | undefined;
+                for (const [index, frameNode] of frameNodes.entries()) {
+                    if (controller.signal.aborted) break;
+                    const shot = shots[index];
+                    const productFrameReferences = referenceInputSupported && shot.productVisible ? references : [];
+                    const prompt = buildStoryboardFramePrompt(shot, productContent, productFrameReferences.length, Boolean(previousReference), referenceInputSupported);
+                    const frameReferences = referenceInputSupported ? [...productFrameReferences, ...(characterReference ? [characterReference] : []), ...(previousReference ? [previousReference] : [])] : [];
+                    const generationType: CanvasImageGenerationType = referenceInputSupported ? "edit" : "generation";
+                    const continuityFrameNodeId = previousFrameNodeId;
+                    setNodes((prev) =>
+                        prev.map((node) =>
+                            node.id === frameNode.id
+                                ? {
+                                      ...node,
+                                      metadata: {
+                                          ...node.metadata,
+                                          prompt,
+                                          previousStoryboardFrameNodeId: continuityFrameNodeId,
+                                          ...buildImageGenerationMetadata(generationType, imageConfig, 1, frameReferences),
+                                      },
+                                  }
+                                : node,
+                        ),
+                    );
+                    try {
+                        const { generated, uploaded } = await storyboardImageRequestQueueRef.current.run(
+                            async ({ attempt, signal }) => {
+                                const generated =
+                                    generationType === "edit" ? await requestEdit(imageConfig, prompt, frameReferences, undefined, { signal }).then((items) => items[0]) : await requestGeneration(imageConfig, prompt, { signal }).then((items) => items[0]);
+                                markStoryboardGenerationSaving(frameNode.id, attempt);
+                                const uploaded = await uploadImage(generated.dataUrl);
+                                return { generated, uploaded };
+                            },
+                            {
+                                signal: controller.signal,
+                                onPhase: (event) => updateStoryboardGenerationPhase(frameNode.id, event),
+                            },
+                        );
+                        if (referenceInputSupported) {
+                            previousReference = {
+                                id: frameNode.id,
+                                name: `${frameNode.title}.png`,
+                                type: uploaded.mimeType || "image/png",
+                                dataUrl: generated.dataUrl,
+                                url: uploaded.url,
+                                storageKey: uploaded.storageKey,
+                            };
+                        }
+                        completed += 1;
+                        setNodes((prev) =>
+                            prev.map((node) =>
+                                node.id === frameNode.id
+                                    ? {
+                                          ...node,
+                                          width: frameWidth,
+                                          height: frameHeight,
+                                          metadata: {
+                                              ...node.metadata,
+                                              ...imageMetadata(uploaded),
+                                              prompt,
+                                              previousStoryboardFrameNodeId: continuityFrameNodeId,
+                                              storyboardImageReviewStatus: "pending",
+                                              ...buildImageGenerationMetadata(generationType, imageConfig, 1, frameReferences),
+                                              ...finishStoryboardGenerationMetadata(node.metadata),
+                                          },
+                                      }
+                                    : node,
+                            ),
+                        );
+                        previousFrameNodeId = frameNode.id;
+                    } catch (error) {
+                        if (isGenerationCanceled(error)) break;
+                        const errorDetails = error instanceof Error ? error.message : "故事板画面生成失败";
+                        setNodes((prev) => prev.map((node) => (node.id === frameNode.id ? { ...node, metadata: { ...node.metadata, status: NODE_STATUS_ERROR, errorDetails, ...finishStoryboardGenerationMetadata(node.metadata) } } : node)));
+                    }
+                }
+
+                if (controller.signal.aborted) return;
+                if (completed === frameNodes.length) message.success(`${characterNode ? "角色基准和 " : ""}${completed} 张剧情预演图已生成，请按顺序检查剧情`);
+                else if (completed) message.warning(`剧情预演图完成 ${completed}/${frameNodes.length} 张，可在失败节点上重新生成`);
+                else message.error("所有剧情预演图均生成失败");
+            } finally {
+                targetIds.forEach((targetId) => finishGenerationRequest(targetId, controller));
+                setRunningNodeId(null);
+            }
+        },
+        [effectiveConfig, finishGenerationRequest, isAiConfigReady, markStoryboardGenerationSaving, message, openConfigDialog, startGenerationRequest, updateStoryboardGenerationPhase],
+    );
+
+    const handleRegenerateStoryboardImage = useCallback(
+        async (node: CanvasNodeData) => {
+            const workflowKind = workflowKindOf(node);
+            const productNode = nodesRef.current.find((item) => item.id === node.metadata?.productBriefNodeId);
+            const prompt = node.metadata?.prompt?.trim();
+            if (!productNode || !prompt) {
+                message.error("故事板图片缺少产品资料或提示词");
+                return;
+            }
+            if (workflowKind === "character-reference" || workflowKind === "storyboard-frame") {
+                const storyboardNode = nodesRef.current.find((item) => item.id === node.metadata?.storyboardNodeId);
+                const sourceScriptNode = storyboardNode ? nodesRef.current.find((item) => item.id === storyboardNode.metadata?.workflowParentId) : undefined;
+                const sourceScript = sourceScriptNode?.metadata?.content?.trim();
+                const shots = storyboardNode?.metadata?.storyboardShots || [];
+                try {
+                    if (!storyboardNode || !sourceScript) throw new Error("找不到该故事板连接的原剧本");
+                    validateStoryboardForGeneration(shots, sourceScript);
+                } catch (error) {
+                    message.error(`该图片来自未通过原剧本校验的分镜：${error instanceof Error ? error.message : "分镜与原剧本不一致"}。请先在结构化分镜节点点击“重试”`);
+                    return;
+                }
+            }
+            const imageConfig = {
+                ...buildGenerationConfig(effectiveConfig, node, "image"),
+                count: "1",
+                size: STORYBOARD_PREVIEW_REQUEST_SIZE,
+                quality: STORYBOARD_PREVIEW_QUALITY,
+            };
+            if (!isAiConfigReady(imageConfig, imageConfig.model)) {
+                openConfigDialog(true);
+                return;
+            }
+            const referenceInputSupported = supportsImageReferenceInput(imageConfig);
+            const productReferences = await resolveProductReferenceImages(productNode);
+            if (!productReferences.length) {
+                message.error("产品参考图已丢失，无法重新生成");
+                return;
+            }
+            let references: ReferenceImage[] = referenceInputSupported ? productReferences : [];
+            let generationType: CanvasImageGenerationType = referenceInputSupported ? "edit" : "generation";
+            if (workflowKind === "character-reference") {
+                references = [];
+                generationType = "generation";
+            } else if (workflowKind === "storyboard-frame" && referenceInputSupported) {
+                const characterNode = nodesRef.current.find((item) => item.id === node.metadata?.characterReferenceNodeId);
+                const characterReference = characterNode ? await resolveCanvasImageReference(characterNode) : null;
+                if (!characterReference) {
+                    message.error("角色基准图不可用，请先重新生成角色基准");
+                    return;
+                }
+                const previousNode = node.metadata?.previousStoryboardFrameNodeId ? nodesRef.current.find((item) => item.id === node.metadata?.previousStoryboardFrameNodeId) : undefined;
+                const previousReference = previousNode ? await resolveCanvasImageReference(previousNode) : null;
+                if (node.metadata?.previousStoryboardFrameNodeId && !previousReference) {
+                    message.error("上一张故事板画面不可用，请先重新生成上一镜头");
+                    return;
+                }
+                const productFrameReferences = node.metadata?.storyboardProductVisible === false ? [] : productReferences;
+                references = [...productFrameReferences, characterReference, ...(previousReference ? [previousReference] : [])];
+            }
+
+            setRunningNodeId(node.id);
+            setNodes((prev) =>
+                prev.map((item) =>
+                    item.id === node.id
+                        ? {
+                              ...item,
+                              ...STORYBOARD_IMAGE_NODE_SIZE,
+                              metadata: {
+                                  ...item.metadata,
+                                  status: NODE_STATUS_LOADING,
+                                  errorDetails: undefined,
+                                  storyboardImageReviewStatus: "pending",
+                                  storyboardDisplaySizeVersion: STORYBOARD_IMAGE_NODE_SIZE_VERSION,
+                                  storyboardReferenceInputSupported: referenceInputSupported,
+                                  storyboardGenerationPhase: "queued",
+                                  storyboardGenerationQueuedAt: Date.now(),
+                                  storyboardGenerationStartedAt: undefined,
+                                  storyboardGenerationAttempt: undefined,
+                                  storyboardGenerationRetryDelayMs: undefined,
+                                  storyboardGenerationElapsedMs: undefined,
+                                  testFrameReviewStatus: workflowKind === "test-frame" ? "pending" : item.metadata?.testFrameReviewStatus,
+                              },
+                          }
+                        : item,
+                ),
+            );
+            const controller = startGenerationRequest(node.id, node.id, node.id);
+            const resumedFrameIds: string[] = [];
+            try {
+                const { generated, uploaded } = await storyboardImageRequestQueueRef.current.run(
+                    async ({ attempt, signal }) => {
+                        const generated =
+                            generationType === "generation" ? await requestGeneration(imageConfig, prompt, { signal }).then((items) => items[0]) : await requestEdit(imageConfig, prompt, references, undefined, { signal }).then((items) => items[0]);
+                        markStoryboardGenerationSaving(node.id, attempt);
+                        const uploaded = await uploadImage(generated.dataUrl);
+                        return { generated, uploaded };
+                    },
+                    {
+                        signal: controller.signal,
+                        onPhase: (event) => updateStoryboardGenerationPhase(node.id, event),
+                    },
+                );
+                setNodes((prev) =>
+                    prev.map((item) =>
+                        item.id === node.id
+                            ? {
+                                  ...item,
+                                  ...STORYBOARD_IMAGE_NODE_SIZE,
+                                  metadata: {
+                                      ...item.metadata,
+                                      ...imageMetadata(uploaded),
+                                      prompt,
+                                      storyboardImageReviewStatus: "pending",
+                                      storyboardDisplaySizeVersion: STORYBOARD_IMAGE_NODE_SIZE_VERSION,
+                                      testFrameReviewStatus: workflowKind === "test-frame" ? "pending" : item.metadata?.testFrameReviewStatus,
+                                      ...buildImageGenerationMetadata(generationType, imageConfig, 1, references),
+                                      ...finishStoryboardGenerationMetadata(item.metadata),
+                                  },
+                              }
+                            : item,
+                    ),
+                );
+                if (workflowKind === "character-reference" && referenceInputSupported) {
+                    const storyboardNode = nodesRef.current.find((item) => item.id === node.metadata?.storyboardNodeId);
+                    const shots = storyboardNode?.metadata?.storyboardShots || [];
+                    const productContent = productNode.metadata?.content?.trim();
+                    const blockedFrames = nodesRef.current
+                        .filter(
+                            (item) =>
+                                workflowKindOf(item) === "storyboard-frame" && item.metadata?.characterReferenceNodeId === node.id && item.metadata?.status === NODE_STATUS_ERROR && item.metadata?.errorDetails === "角色基准图生成失败，未执行故事板出图",
+                        )
+                        .sort((a, b) => (a.metadata?.storyboardFrameIndex || 0) - (b.metadata?.storyboardFrameIndex || 0));
+
+                    if (!blockedFrames.length || !shots.length || !productContent) {
+                        message.success("角色基准已更新");
+                    } else {
+                        resumedFrameIds.push(...blockedFrames.map((item) => item.id));
+                        resumedFrameIds.forEach((frameId) => startGenerationRequest(frameId, node.id, node.id, controller));
+                        setNodes((prev) =>
+                            prev.map((item) =>
+                                resumedFrameIds.includes(item.id)
+                                    ? {
+                                          ...item,
+                                          ...STORYBOARD_IMAGE_NODE_SIZE,
+                                          metadata: {
+                                              ...item.metadata,
+                                              status: NODE_STATUS_LOADING,
+                                              errorDetails: undefined,
+                                              storyboardDisplaySizeVersion: STORYBOARD_IMAGE_NODE_SIZE_VERSION,
+                                              storyboardReferenceInputSupported: true,
+                                              storyboardGenerationPhase: "queued",
+                                              storyboardGenerationQueuedAt: Date.now(),
+                                              storyboardGenerationStartedAt: undefined,
+                                              storyboardGenerationAttempt: undefined,
+                                              storyboardGenerationRetryDelayMs: undefined,
+                                              storyboardGenerationElapsedMs: undefined,
+                                          },
+                                      }
+                                    : item,
+                            ),
+                        );
+
+                        const characterReference: ReferenceImage = {
+                            id: node.id,
+                            name: `${node.title}.png`,
+                            type: uploaded.mimeType || "image/png",
+                            dataUrl: generated.dataUrl,
+                            url: uploaded.url,
+                            storageKey: uploaded.storageKey,
+                        };
+                        let completed = 0;
+                        let previousReference: ReferenceImage | undefined;
+                        let previousFrameNodeId: string | undefined;
+
+                        for (const frameNode of blockedFrames) {
+                            if (controller.signal.aborted) break;
+                            const frameIndex = frameNode.metadata?.storyboardFrameIndex || 0;
+                            const shot = shots[frameIndex];
+                            if (!shot) {
+                                setNodes((prev) =>
+                                    prev.map((item) =>
+                                        item.id === frameNode.id
+                                            ? {
+                                                  ...item,
+                                                  metadata: {
+                                                      ...item.metadata,
+                                                      status: NODE_STATUS_ERROR,
+                                                      errorDetails: `找不到分镜 ${frameNode.metadata?.storyboardShotId || frameIndex + 1}`,
+                                                      ...finishStoryboardGenerationMetadata(item.metadata),
+                                                  },
+                                              }
+                                            : item,
+                                    ),
+                                );
+                                continue;
+                            }
+
+                            const productFrameReferences = shot.productVisible ? productReferences : [];
+                            const framePrompt = buildStoryboardFramePrompt(shot, productContent, productFrameReferences.length, Boolean(previousReference), true);
+                            const frameReferences = [...productFrameReferences, characterReference, ...(previousReference ? [previousReference] : [])];
+                            const continuityFrameNodeId = previousFrameNodeId;
+                            setNodes((prev) =>
+                                prev.map((item) =>
+                                    item.id === frameNode.id
+                                        ? {
+                                              ...item,
+                                              metadata: {
+                                                  ...item.metadata,
+                                                  prompt: framePrompt,
+                                                  previousStoryboardFrameNodeId: continuityFrameNodeId,
+                                                  ...buildImageGenerationMetadata("edit", imageConfig, 1, frameReferences),
+                                              },
+                                          }
+                                        : item,
+                                ),
+                            );
+
+                            try {
+                                const { frameGenerated, frameUploaded } = await storyboardImageRequestQueueRef.current.run(
+                                    async ({ attempt, signal }) => {
+                                        const frameGenerated = await requestEdit(imageConfig, framePrompt, frameReferences, undefined, { signal }).then((items) => items[0]);
+                                        markStoryboardGenerationSaving(frameNode.id, attempt);
+                                        const frameUploaded = await uploadImage(frameGenerated.dataUrl);
+                                        return { frameGenerated, frameUploaded };
+                                    },
+                                    {
+                                        signal: controller.signal,
+                                        onPhase: (event) => updateStoryboardGenerationPhase(frameNode.id, event),
+                                    },
+                                );
+                                previousReference = {
+                                    id: frameNode.id,
+                                    name: `${frameNode.title}.png`,
+                                    type: frameUploaded.mimeType || "image/png",
+                                    dataUrl: frameGenerated.dataUrl,
+                                    url: frameUploaded.url,
+                                    storageKey: frameUploaded.storageKey,
+                                };
+                                previousFrameNodeId = frameNode.id;
+                                completed += 1;
+                                setNodes((prev) =>
+                                    prev.map((item) =>
+                                        item.id === frameNode.id
+                                            ? {
+                                                  ...item,
+                                                  ...STORYBOARD_IMAGE_NODE_SIZE,
+                                                  metadata: {
+                                                      ...item.metadata,
+                                                      ...imageMetadata(frameUploaded),
+                                                      prompt: framePrompt,
+                                                      previousStoryboardFrameNodeId: continuityFrameNodeId,
+                                                      storyboardImageReviewStatus: "pending",
+                                                      storyboardDisplaySizeVersion: STORYBOARD_IMAGE_NODE_SIZE_VERSION,
+                                                      ...buildImageGenerationMetadata("edit", imageConfig, 1, frameReferences),
+                                                      ...finishStoryboardGenerationMetadata(item.metadata),
+                                                  },
+                                              }
+                                            : item,
+                                    ),
+                                );
+                            } catch (error) {
+                                if (isGenerationCanceled(error)) break;
+                                const requestError = error instanceof Error ? error.message : "故事板画面生成失败";
+                                setNodes((prev) =>
+                                    prev.map((item) =>
+                                        item.id === frameNode.id
+                                            ? {
+                                                  ...item,
+                                                  metadata: {
+                                                      ...item.metadata,
+                                                      status: NODE_STATUS_ERROR,
+                                                      errorDetails: `模型 ${imageConfig.model}：${requestError}`,
+                                                      ...finishStoryboardGenerationMetadata(item.metadata),
+                                                  },
+                                              }
+                                            : item,
+                                    ),
+                                );
+                            }
+                        }
+
+                        if (!controller.signal.aborted) {
+                            if (completed === blockedFrames.length) message.success(`角色基准重试成功，已继续生成 ${completed} 张故事板`);
+                            else if (completed) message.warning(`角色基准重试成功，故事板继续完成 ${completed}/${blockedFrames.length} 张`);
+                            else message.error("角色基准重试成功，但后续故事板仍全部失败");
+                        }
+                    }
+                } else if (workflowKind === "character-reference") {
+                    message.success("角色基准已更新；当前渠道不支持参考图输入，后续故事板不会调用这张图");
+                } else {
+                    message.success("故事板画面已重新生成");
+                }
+            } catch (error) {
+                if (!isGenerationCanceled(error)) {
+                    const requestError = error instanceof Error ? error.message : "故事板图片重新生成失败";
+                    const errorDetails = `模型 ${imageConfig.model}：${requestError}`;
+                    message.error(errorDetails);
+                    setNodes((prev) => prev.map((item) => (item.id === node.id ? { ...item, metadata: { ...item.metadata, status: NODE_STATUS_ERROR, errorDetails, ...finishStoryboardGenerationMetadata(item.metadata) } } : item)));
+                }
+            } finally {
+                resumedFrameIds.forEach((frameId) => finishGenerationRequest(frameId, controller));
+                finishGenerationRequest(node.id, controller);
+                setRunningNodeId(null);
+            }
+        },
+        [effectiveConfig, finishGenerationRequest, isAiConfigReady, markStoryboardGenerationSaving, message, openConfigDialog, startGenerationRequest, updateStoryboardGenerationPhase],
+    );
+
+    const approveStoryboardImage = useCallback(
+        (node: CanvasNodeData) => {
+            const workflowKind = workflowKindOf(node);
+            setNodes((prev) =>
+                prev.map((item) =>
+                    item.id === node.id
+                        ? {
+                              ...item,
+                              metadata: {
+                                  ...item.metadata,
+                                  storyboardImageReviewStatus: "approved",
+                                  testFrameReviewStatus: workflowKind === "test-frame" ? "approved" : item.metadata?.testFrameReviewStatus,
+                              },
+                          }
+                        : item,
+                ),
+            );
+            message.success(workflowKind === "character-reference" ? "角色基准已通过" : "故事板画面已通过");
+        },
+        [message],
+    );
+
+    const saveStoryboardImagePrompt = useCallback(
+        (prompt: string) => {
+            if (!storyboardImagePromptNodeId) return;
+            setNodes((prev) =>
+                prev.map((node) =>
+                    node.id === storyboardImagePromptNodeId
+                        ? { ...node, metadata: { ...node.metadata, prompt, storyboardImageReviewStatus: "pending", testFrameReviewStatus: workflowKindOf(node) === "test-frame" ? "pending" : node.metadata?.testFrameReviewStatus } }
+                        : node,
+                ),
+            );
+            setStoryboardImagePromptNodeId(null);
+            message.success("提示词已保存，点击“重新生成”应用新提示词");
+        },
+        [message, storyboardImagePromptNodeId],
+    );
+
     useEffect(() => {
         generateNodeRef.current = handleGenerateNode;
     }, [handleGenerateNode]);
 
+    const handleRetryStoryboardNode = useCallback(
+        async (storyboardNode: CanvasNodeData) => {
+            const scriptNode = nodesRef.current.find((node) => node.id === storyboardNode.metadata?.workflowParentId) || findRetrySourceNode(storyboardNode.id, nodesRef.current, connectionsRef.current);
+            const productNode = nodesRef.current.find((node) => node.id === storyboardNode.metadata?.productBriefNodeId);
+            const script = scriptNode?.metadata?.content?.trim();
+            const productContent = productNode?.metadata?.content?.trim();
+            if (!scriptNode || !script || !productNode || !productContent) {
+                message.warning("原剧本或产品资料不完整，无法重试分镜");
+                return;
+            }
+
+            const textConfig = buildGenerationConfig(effectiveConfig, undefined, "text");
+            textConfig.model = storyboardNode.metadata?.model || scriptNode.metadata?.model || textConfig.model;
+            if (!isAiConfigReady(textConfig, textConfig.model)) {
+                openConfigDialog(true);
+                return;
+            }
+
+            setRunningNodeId(storyboardNode.id);
+            setNodes((prev) =>
+                prev.map((node) =>
+                    node.id === storyboardNode.id
+                        ? {
+                              ...node,
+                              metadata: {
+                                  ...node.metadata,
+                                  content: "",
+                                  storyboardShots: undefined,
+                                  status: NODE_STATUS_LOADING,
+                                  errorDetails: undefined,
+                              },
+                          }
+                        : node,
+                ),
+            );
+            const controller = startGenerationRequest(storyboardNode.id, scriptNode.id, storyboardNode.id);
+
+            try {
+                const references = await resolveProductReferenceImages(productNode);
+                const shots = await requestStoryboardWithRepair(textConfig, script, productContent, references, controller.signal, () => message.info("首次分镜结构不完整，正在自动修复一次"));
+                setNodes((prev) =>
+                    prev.map((node) =>
+                        node.id === storyboardNode.id
+                            ? {
+                                  ...node,
+                                  metadata: {
+                                      ...node.metadata,
+                                      content: formatStoryboardMarkdown(shots),
+                                      storyboardShots: shots,
+                                      prompt: "将产品带货剧本拆成可执行分镜",
+                                      status: NODE_STATUS_SUCCESS,
+                                      errorDetails: undefined,
+                                  },
+                              }
+                            : node,
+                    ),
+                );
+                message.success(`已重新拆成 ${shots.length} 个分镜`);
+            } catch (error) {
+                if (!isGenerationCanceled(error)) {
+                    const errorDetails = error instanceof Error ? error.message : "分镜生成失败";
+                    message.error(errorDetails);
+                    setNodes((prev) =>
+                        prev.map((node) =>
+                            node.id === storyboardNode.id
+                                ? {
+                                      ...node,
+                                      metadata: {
+                                          ...node.metadata,
+                                          status: NODE_STATUS_ERROR,
+                                          errorDetails,
+                                      },
+                                  }
+                                : node,
+                        ),
+                    );
+                }
+            } finally {
+                finishGenerationRequest(storyboardNode.id, controller);
+                setRunningNodeId(null);
+            }
+        },
+        [effectiveConfig, finishGenerationRequest, isAiConfigReady, message, openConfigDialog, startGenerationRequest],
+    );
+
     const handleRetryNode = useCallback(
         async (node: CanvasNodeData) => {
+            const workflowKind = workflowKindOf(node);
+            if (workflowKind === "character-reference" || workflowKind === "storyboard-frame" || workflowKind === "test-frame") {
+                await handleRegenerateStoryboardImage(node);
+                return;
+            }
+            if (workflowKind === "storyboard") {
+                await handleRetryStoryboardNode(node);
+                return;
+            }
+
             const sourceNode = findRetrySourceNode(node.id, nodesRef.current, connectionsRef.current) || node;
             const batchRoot = node.metadata?.batchRootId ? nodesRef.current.find((item) => item.id === node.metadata?.batchRootId) : null;
             const savedImageMetadata = node.type === CanvasNodeType.Image ? { ...batchRoot?.metadata, ...node.metadata } : undefined;
@@ -2405,7 +3833,6 @@ function InfiniteCanvasPage() {
                           model: savedImageMetadata.model || effectiveConfig.imageModel || effectiveConfig.model,
                           quality: savedImageMetadata.quality || effectiveConfig.quality,
                           size: savedImageMetadata.size || effectiveConfig.size,
-                          background: savedImageMetadata.background ?? effectiveConfig.background,
                           count: "1",
                       }
                     : { ...buildGenerationConfig(effectiveConfig, sourceNode, node.type === CanvasNodeType.Text ? "text" : node.type === CanvasNodeType.Video ? "video" : node.type === CanvasNodeType.Audio ? "audio" : "image"), count: "1" };
@@ -2492,15 +3919,7 @@ function InfiniteCanvasPage() {
                 const imageConfig = NODE_DEFAULT_SIZE[CanvasNodeType.Image];
                 const imageSize = fitNodeSize(uploadedImage.width, uploadedImage.height, imageConfig.width, imageConfig.height);
                 const generationMetadata = savedImageMetadata?.generationType
-                    ? {
-                          generationType: savedImageMetadata.generationType,
-                          model: generationConfig.model,
-                          size: generationConfig.size,
-                          quality: generationConfig.quality,
-                          ...(generationConfig.background ? { background: generationConfig.background } : {}),
-                          count: savedImageMetadata.count || 1,
-                          references: savedImageMetadata.references,
-                      }
+                    ? { generationType: savedImageMetadata.generationType, model: generationConfig.model, size: generationConfig.size, quality: generationConfig.quality, count: savedImageMetadata.count || 1, references: savedImageMetadata.references }
                     : buildImageGenerationMetadata(useReferenceImages ? "edit" : "generation", generationConfig, 1, retryImages);
                 setNodes((prev) =>
                     prev.map((item) =>
@@ -2525,7 +3944,7 @@ function InfiniteCanvasPage() {
                 setRunningNodeId(null);
             }
         },
-        [effectiveConfig, finishGenerationRequest, isAiConfigReady, message, openConfigDialog, startGenerationRequest],
+        [effectiveConfig, finishGenerationRequest, handleRegenerateStoryboardImage, handleRetryStoryboardNode, isAiConfigReady, message, openConfigDialog, startGenerationRequest],
     );
 
     const generateImageFromTextNode = useCallback(
@@ -2635,72 +4054,83 @@ function InfiniteCanvasPage() {
         [insertAssistantImage, insertAssistantText, screenToCanvas, size.height, size.width],
     );
 
-    // --- 传给 CanvasNode 的回调/渲染函数统一 memo 化 ---
-    // CanvasNode 是 React.memo,但只要这些 prop 每次渲染都是新引用,memo 就失效,
-    // 导致点击/悬停/移动视角时全部节点跟着重渲染(markdown 尤其明显)。全部 useCallback 后,
-    // 未变化的节点不再重渲染。依赖里的 map/handler 均已 memo 化,纯交互时保持稳定。
-    const handleNodeHoverStart = useCallback((nodeId: string) => {
-        if (nodeDraggingRef.current) return;
-        setHoveredNodeId(nodeId);
-    }, []);
-    const handleNodeHoverEnd = useCallback((nodeId: string) => {
-        setHoveredNodeId((current) => (current === nodeId ? null : current));
-    }, []);
-    const handleNodeViewImage = useCallback((node: CanvasNodeData) => setPreviewNodeId(node.id), []);
-    const handleNodeRetry = useCallback((node: CanvasNodeData) => void handleRetryNode(node), [handleRetryNode]);
-    const handleNodeContextMenu = useCallback((event: ReactMouseEvent, nodeId: string) => {
-        event.preventDefault();
-        event.stopPropagation();
-        setContextMenu({ type: "node", x: event.clientX, y: event.clientY, nodeId });
-    }, []);
-
-    const renderNodePanel = useCallback(
-        (panelNode: CanvasNodeData) =>
-            getNodeDefinition(panelNode.type)?.Panel ? (
-                renderPluginPanel(panelNode)
-            ) : panelNode.type === CanvasNodeType.Config ? (
-                <CanvasConfigComposer
-                    value={panelNode.metadata?.composerContent ?? panelNode.metadata?.prompt ?? ""}
-                    inputs={configInputsById.get(panelNode.id) || []}
-                    onChange={(composerContent) => handleConfigNodeChange(panelNode.id, { composerContent })}
-                    onClose={() => setDialogNodeId(null)}
-                />
-            ) : (
-                <CanvasNodePromptPanel
-                    node={panelNode}
-                    isRunning={runningNodeId === panelNode.id}
-                    mentionReferences={mentionReferencesByNodeId.get(panelNode.id) || EMPTY_REFERENCES}
-                    onPromptChange={handleNodePromptChange}
-                    onConfigChange={handleConfigNodeChange}
-                    onGenerate={handleGenerateNode}
-                    onStop={confirmStopGeneration}
-                    modeOverride={getNodeDefinition(panelNode.type)?.useBuiltinPanel?.mode}
-                    onImageSettingsOpenChange={(open) => {
-                        setNodeImageSettingsOpen(open);
-                        if (open) setToolbarNodeId(null);
-                    }}
-                />
-            ),
-        [configInputsById, confirmStopGeneration, handleConfigNodeChange, handleGenerateNode, handleNodePromptChange, mentionReferencesByNodeId, renderPluginPanel, runningNodeId],
-    );
-
-    const renderNodeContentPanel = useCallback(
-        (contentNode: CanvasNodeData) => (
-            <CanvasConfigNodePanel
-                node={contentNode}
-                isRunning={runningNodeId === contentNode.id}
-                inputSummary={getInputSummary(configInputsById.get(contentNode.id) || [])}
-                onConfigChange={handleConfigNodeChange}
-                onComposerToggle={() => setDialogNodeId((current) => (current === contentNode.id ? null : contentNode.id))}
-                onStop={confirmStopGeneration}
-                onGenerate={(nodeId) => {
-                    const target = nodesRef.current.find((item) => item.id === nodeId);
-                    void handleGenerateNode(nodeId, target?.metadata?.generationMode || "image", target?.metadata?.composerContent ?? target?.metadata?.prompt ?? "");
-                }}
-            />
-        ),
-        [configInputsById, confirmStopGeneration, handleConfigNodeChange, handleGenerateNode, runningNodeId],
-    );
+    const workflowToolbarTools: CanvasNodeToolbarItem[] = [];
+    const toolbarWorkflowKind = workflowKindOf(toolbarNode);
+    if (toolbarNode && toolbarWorkflowKind === "reference-analysis") {
+        workflowToolbarTools.push({
+            id: "workflow-generate-script",
+            title: "填写产品资料，先生成3个剧情钩子再选择完整剧本",
+            label: "生成新剧本",
+            icon: <FilePenLine className="size-4" />,
+            onClick: () => setProductScriptSourceNodeId(toolbarNode.id),
+        });
+    }
+    if (toolbarNode && toolbarWorkflowKind === "hook-options" && toolbarNode.metadata?.status !== NODE_STATUS_LOADING) {
+        if (toolbarNode.metadata?.status === NODE_STATUS_SUCCESS && toolbarNode.metadata.hookOptions?.length) {
+            workflowToolbarTools.push({
+                id: "workflow-select-hook",
+                title: "比较3个剧情钩子并选择一个生成完整剧本",
+                label: "选择钩子",
+                icon: <ListChecks className="size-4" />,
+                onClick: () => setHookSelectionNodeId(toolbarNode.id),
+            });
+        }
+        workflowToolbarTools.push({
+            id: "workflow-regenerate-hooks",
+            title: "基于同一份对标拆解和产品资料重新生成3个钩子",
+            label: "重新生成3案",
+            icon: <RefreshCw className="size-4" />,
+            onClick: () => void handleRegenerateHookOptions(toolbarNode),
+        });
+    }
+    if (toolbarNode && toolbarWorkflowKind === "sales-script" && toolbarNode.metadata?.status === NODE_STATUS_SUCCESS) {
+        workflowToolbarTools.push({
+            id: "workflow-split-storyboard",
+            title: "把剧本拆成结构化分镜和关键帧提示词",
+            label: "拆成分镜",
+            icon: <Clapperboard className="size-4" />,
+            onClick: () => void handleSplitStoryboard(toolbarNode),
+        });
+    }
+    if (toolbarNode && toolbarWorkflowKind === "storyboard" && toolbarNode.metadata?.status === NODE_STATUS_SUCCESS) {
+        workflowToolbarTools.push({
+            id: "workflow-generate-storyboard-images",
+            title: "先生成角色基准，再按顺序生成全部分镜画面",
+            label: "生成完整故事板",
+            icon: <Images className="size-4" />,
+            onClick: () => void handleGenerateStoryboardImages(toolbarNode),
+        });
+    }
+    if (toolbarNode && (toolbarWorkflowKind === "character-reference" || toolbarWorkflowKind === "storyboard-frame" || toolbarWorkflowKind === "test-frame")) {
+        const isCharacterReference = toolbarWorkflowKind === "character-reference";
+        workflowToolbarTools.push(
+            {
+                id: "workflow-edit-frame-prompt",
+                title: isCharacterReference ? "修改角色身份基准提示词" : "修改这张故事板画面的提示词",
+                label: "修改提示词",
+                icon: <Pencil className="size-4" />,
+                onClick: () => setStoryboardImagePromptNodeId(toolbarNode.id),
+            },
+            {
+                id: "workflow-regenerate-frame",
+                title: isCharacterReference ? "使用当前提示词重新生成角色基准" : "使用角色基准、产品图和上一镜头重新生成",
+                label: "重新生成",
+                icon: <RefreshCw className="size-4" />,
+                onClick: () => void handleRegenerateStoryboardImage(toolbarNode),
+            },
+        );
+        if (toolbarNode.metadata?.content) {
+            workflowToolbarTools.push({
+                id: "workflow-approve-frame",
+                title: isCharacterReference ? "确认主角身份基准可用于整套故事板" : "确认这张故事板画面通过剧情与视觉检查",
+                label: "通过",
+                icon: <CheckCircle2 className="size-4" />,
+                active: (toolbarNode.metadata?.storyboardImageReviewStatus || toolbarNode.metadata?.testFrameReviewStatus) === "approved",
+                onClick: () => approveStoryboardImage(toolbarNode),
+            });
+        }
+    }
+    const pluginToolbarTools = toolbarNode ? getNodeDefinition(toolbarNode.type)?.toolbar?.(buildNodeContext(pluginHost, toolbarNode, theme, viewport.k)) || [] : [];
 
     if (!projectLoaded) return <CanvasRefreshShell />;
 
@@ -2722,7 +4152,6 @@ function InfiniteCanvasPage() {
                     onProjects={() => navigate("/canvas")}
                     onCreateProject={createAndOpenProject}
                     onDeleteProject={deleteCurrentProject}
-                    onExportProject={exportCurrentProject}
                     onImportImage={() => handleUploadRequest()}
                     onOpenPlugins={() => setPluginManagerOpen(true)}
                     onUndo={undoCanvas}
@@ -2795,7 +4224,7 @@ function InfiniteCanvasPage() {
                             isConnectionTarget={connectionTargetNodeId === node.id}
                             isConnecting={Boolean(connectingParams)}
                             editRequestNonce={editingNodeId === node.id ? editRequestNonce : 0}
-                            showPanel={dialogNodeId === node.id && !selectionBox && !getNodeDefinition(node.type)?.hidePanel}
+                            showPanel={dialogNodeId === node.id && !selectionBox}
                             batchCount={batchChildCountById.get(node.id) || 0}
                             groupChildCount={groupChildCountById.get(node.id) || 0}
                             isGroupDropTarget={dropTargetGroupId === node.id}
@@ -2805,25 +4234,73 @@ function InfiniteCanvasPage() {
                             batchRecovering={collapsingBatchIds.has(node.id)}
                             batchMotion={batchMotionById.get(node.id)}
                             showImageInfo={showImageInfo}
-                            mentionReferences={mentionReferencesByNodeId.get(node.id) || EMPTY_REFERENCES}
+                            resourceLabel={resourceReferenceByNodeId.get(node.id)}
+                            mentionReferences={mentionReferencesByNodeId.get(node.id) || []}
                             pluginHost={pluginHost}
                             registryVersion={nodeRegistryVersion}
-                            renderPanel={renderNodePanel}
-                            renderNodeContent={renderNodeContentPanel}
+                            renderPanel={(panelNode) =>
+                                getNodeDefinition(panelNode.type)?.Panel ? (
+                                    renderPluginPanel(panelNode)
+                                ) : panelNode.type === CanvasNodeType.Config ? (
+                                    <CanvasConfigComposer
+                                        value={panelNode.metadata?.composerContent ?? panelNode.metadata?.prompt ?? ""}
+                                        inputs={configInputsById.get(panelNode.id) || []}
+                                        onChange={(composerContent) => handleConfigNodeChange(panelNode.id, { composerContent })}
+                                        onClose={() => setDialogNodeId(null)}
+                                    />
+                                ) : (
+                                    <CanvasNodePromptPanel
+                                        node={panelNode}
+                                        isRunning={runningNodeId === panelNode.id}
+                                        mentionReferences={mentionReferencesByNodeId.get(panelNode.id) || []}
+                                        onPromptChange={handleNodePromptChange}
+                                        onConfigChange={handleConfigNodeChange}
+                                        onGenerate={handleGenerateNode}
+                                        onAnalyzeVideo={handleAnalyzeVideoNode}
+                                        onStop={confirmStopGeneration}
+                                        onImageSettingsOpenChange={(open) => {
+                                            setNodeImageSettingsOpen(open);
+                                            if (open) setToolbarNodeId(null);
+                                        }}
+                                    />
+                                )
+                            }
+                            renderNodeContent={(contentNode) => (
+                                <CanvasConfigNodePanel
+                                    node={contentNode}
+                                    isRunning={runningNodeId === contentNode.id}
+                                    inputSummary={getInputSummary(configInputsById.get(contentNode.id) || [])}
+                                    onConfigChange={handleConfigNodeChange}
+                                    onComposerToggle={() => setDialogNodeId((current) => (current === contentNode.id ? null : contentNode.id))}
+                                    onStop={confirmStopGeneration}
+                                    onGenerate={(nodeId) => {
+                                        const target = nodesRef.current.find((item) => item.id === nodeId);
+                                        void handleGenerateNode(nodeId, target?.metadata?.generationMode || "image", target?.metadata?.composerContent ?? target?.metadata?.prompt ?? "");
+                                    }}
+                                />
+                            )}
                             onMouseDown={handleNodeMouseDown}
-                            onSelectCapture={handleNodeSelectCapture}
-                            onHoverStart={handleNodeHoverStart}
-                            onHoverEnd={handleNodeHoverEnd}
+                            onHoverStart={(nodeId) => {
+                                if (nodeDraggingRef.current) return;
+                                setHoveredNodeId(nodeId);
+                            }}
+                            onHoverEnd={(nodeId) => {
+                                setHoveredNodeId((current) => (current === nodeId ? null : current));
+                            }}
                             onConnectStart={handleConnectStart}
                             onResize={handleNodeResize}
                             onContentChange={handleNodeContentChange}
                             onTitleChange={handleNodeTitleChange}
                             onToggleBatch={toggleBatchExpanded}
                             onSetBatchPrimary={setBatchPrimary}
-                            onRetry={handleNodeRetry}
+                            onRetry={(node) => void handleRetryNode(node)}
                             onGenerateImage={generateImageFromTextNode}
-                            onViewImage={handleNodeViewImage}
-                            onContextMenu={handleNodeContextMenu}
+                            onViewImage={(node) => setPreviewNodeId(node.id)}
+                            onContextMenu={(event, id) => {
+                                event.preventDefault();
+                                event.stopPropagation();
+                                setContextMenu({ type: "node", x: event.clientX, y: event.clientY, nodeId: id });
+                            }}
                         />
                     ))}
 
@@ -2856,7 +4333,7 @@ function InfiniteCanvasPage() {
                 <CanvasNodeHoverToolbar
                     node={isNodeDragging || nodeImageSettingsOpen ? null : toolbarNode}
                     viewport={viewport}
-                    extraTools={toolbarNode ? buildNodeToolbarItems(toolbarNode) : undefined}
+                    extraTools={[...workflowToolbarTools, ...pluginToolbarTools]}
                     onKeep={keepNodeToolbar}
                     onLeave={hideNodeToolbar}
                     onInfo={(node) => setInfoNodeId(node.id)}
@@ -2932,6 +4409,31 @@ function InfiniteCanvasPage() {
 
                 <CanvasNodeInfoModal node={infoNode} open={Boolean(infoNode)} onClose={() => setInfoNodeId(null)} />
                 <CanvasPluginManagerModal open={pluginManagerOpen} onClose={() => setPluginManagerOpen(false)} />
+                <ProductScriptModal
+                    open={Boolean(productScriptSourceNode)}
+                    loading={Boolean(productScriptSourceNode && runningNodeId === productScriptSourceNode.id)}
+                    onClose={() => {
+                        if (productScriptSourceNode && runningNodeId === productScriptSourceNode.id) return;
+                        setProductScriptSourceNodeId(null);
+                    }}
+                    onSubmit={(brief, files) => {
+                        if (productScriptSourceNode) void handleCreateProductHooks(productScriptSourceNode.id, brief, files);
+                    }}
+                />
+                <HookSelectionModal
+                    open={Boolean(hookSelectionNode?.metadata?.hookOptions?.length)}
+                    options={hookSelectionNode?.metadata?.hookOptions || []}
+                    selectedId={hookSelectionNode?.metadata?.selectedHookId}
+                    loading={Boolean(hookSelectionNode && runningNodeId === hookSelectionNode.id)}
+                    onClose={() => {
+                        if (hookSelectionNode && runningNodeId === hookSelectionNode.id) return;
+                        setHookSelectionNodeId(null);
+                    }}
+                    onSubmit={(option) => {
+                        if (hookSelectionNode) void handleCreateScriptFromHook(hookSelectionNode, option);
+                    }}
+                />
+                <StoryboardImagePromptModal open={Boolean(storyboardImagePromptNode)} prompt={storyboardImagePromptNode?.metadata?.prompt || ""} onClose={() => setStoryboardImagePromptNodeId(null)} onSave={saveStoryboardImagePrompt} />
 
                 {cropNode?.metadata?.content ? <CanvasNodeCropDialog dataUrl={cropNode.metadata.content} open={Boolean(cropNode)} onClose={() => setCropNodeId(null)} onConfirm={(crop) => void cropImageNode(cropNode!, crop)} /> : null}
 
@@ -2984,4 +4486,535 @@ function InfiniteCanvasPage() {
             </section>
         </main>
     );
+}
+
+function CanvasTopBar({
+    title,
+    titleDraft,
+    isTitleEditing,
+    onTitleDraftChange,
+    onStartTitleEditing,
+    onFinishTitleEditing,
+    onCancelTitleEditing,
+    canUndo,
+    canRedo,
+    onHome,
+    onProjects,
+    onCreateProject,
+    onDeleteProject,
+    onImportImage,
+    onOpenPlugins,
+    onUndo,
+    onRedo,
+    agentOpen,
+    compactAgentStatus,
+    onToggleAgent,
+}: {
+    title: string;
+    titleDraft: string;
+    isTitleEditing: boolean;
+    onTitleDraftChange: (value: string) => void;
+    onStartTitleEditing: () => void;
+    onFinishTitleEditing: () => void;
+    onCancelTitleEditing: () => void;
+    canUndo: boolean;
+    canRedo: boolean;
+    onHome: () => void;
+    onProjects: () => void;
+    onCreateProject: () => void;
+    onDeleteProject: () => void;
+    onImportImage: () => void;
+    onOpenPlugins: () => void;
+    onUndo: () => void;
+    onRedo: () => void;
+    agentOpen: boolean;
+    compactAgentStatus: { connected: boolean; enabled: boolean; activity: string };
+    onToggleAgent: () => void;
+}) {
+    const colorTheme = useThemeStore((state) => state.theme);
+    const theme = canvasThemes[colorTheme];
+    const titleRef = useRef<HTMLDivElement>(null);
+    const [shortcutsOpen, setShortcutsOpen] = useState(false);
+
+    useEffect(() => {
+        if (!isTitleEditing) return;
+        const close = (event: PointerEvent) => {
+            if (!titleRef.current?.contains(event.target as Node)) onFinishTitleEditing();
+        };
+        document.addEventListener("pointerdown", close, true);
+        return () => document.removeEventListener("pointerdown", close, true);
+    }, [isTitleEditing, onFinishTitleEditing]);
+
+    return (
+        <>
+            <div className="pointer-events-none absolute left-0 right-0 top-0 z-50 flex h-16 items-center justify-between px-4">
+                <div className="pointer-events-auto flex min-w-0 items-center gap-3">
+                    <Dropdown
+                        trigger={["click"]}
+                        menu={{
+                            items: [
+                                { key: "home", icon: <Home className="size-4" />, label: "主页", onClick: onHome },
+                                { key: "docs", icon: <BookOpen className="size-4" />, label: "文档", onClick: () => window.open(DOCS_URL, "_blank", "noopener,noreferrer") },
+                                { key: "projects", icon: <Images className="size-4" />, label: "我的画布", onClick: onProjects },
+                                { type: "divider" },
+                                { key: "new", icon: <Plus className="size-4" />, label: "新建画布", onClick: onCreateProject },
+                                { key: "delete", danger: true, icon: <Trash2 className="size-4" />, label: "删除当前画布", onClick: onDeleteProject },
+                                { type: "divider" },
+                                { key: "import", icon: <Upload className="size-4" />, label: "导入资产", onClick: onImportImage },
+                                { type: "divider" },
+                                { key: "undo", disabled: !canUndo, icon: <Undo2 className="size-4" />, label: <MenuLabel text="撤销" shortcut="⌘ Z" />, onClick: onUndo },
+                                { key: "redo", disabled: !canRedo, icon: <Redo2 className="size-4" />, label: <MenuLabel text="重做" shortcut="⌘ ⇧ Z / ⌘ Y" />, onClick: onRedo },
+                            ],
+                        }}
+                    >
+                        <button type="button" className="grid size-9 place-items-center rounded-full transition hover:bg-black/5 dark:hover:bg-white/10" style={{ color: theme.node.text }} aria-label="打开画布菜单">
+                            <Menu className="size-5" />
+                        </button>
+                    </Dropdown>
+
+                    <div ref={titleRef} className="flex min-w-0 items-center gap-2">
+                        {isTitleEditing ? (
+                            <input
+                                autoFocus
+                                value={titleDraft}
+                                onChange={(event) => onTitleDraftChange(event.target.value)}
+                                onBlur={onFinishTitleEditing}
+                                onKeyDown={(event) => {
+                                    if (event.key === "Enter") onFinishTitleEditing();
+                                    if (event.key === "Escape") onCancelTitleEditing();
+                                }}
+                                className="max-w-[280px] bg-transparent p-0 text-left text-lg font-semibold tracking-normal outline-none"
+                                style={{ color: theme.node.text }}
+                            />
+                        ) : (
+                            <button
+                                type="button"
+                                className="max-w-[280px] truncate border-b border-dashed border-transparent text-left text-lg font-semibold tracking-normal transition hover:border-current"
+                                onDoubleClick={onStartTitleEditing}
+                                title="双击修改画布名称"
+                            >
+                                {title}
+                            </button>
+                        )}
+                    </div>
+                    <CompactAgentStatus status={compactAgentStatus} onClick={onToggleAgent} />
+                </div>
+
+                <div className="pointer-events-auto flex items-center gap-1.5">
+                    <UserStatusActions variant="canvas" onOpenShortcuts={() => setShortcutsOpen(true)} onOpenPlugins={onOpenPlugins} />
+                    <span className="h-6 w-px" style={{ background: theme.toolbar.border }} />
+                    <Button
+                        type="text"
+                        className="!h-10 !rounded-xl !px-3 !font-medium"
+                        style={{ background: agentOpen ? theme.toolbar.activeBg : theme.toolbar.panel, color: theme.node.text, boxShadow: "0 10px 30px rgba(28,25,23,.10)" }}
+                        icon={<Bot className="size-4" />}
+                        onClick={onToggleAgent}
+                    >
+                        Agent
+                    </Button>
+                </div>
+            </div>
+            <Modal title="快捷键" open={shortcutsOpen} onCancel={() => setShortcutsOpen(false)} footer={null} centered>
+                <div className="space-y-2 border-t pt-4 text-sm" style={{ borderColor: theme.node.stroke }}>
+                    <Shortcut keys={["拖动画布"]} value="平移视图" />
+                    <Shortcut keys={["滚轮"]} value="缩放画布" />
+                    <Shortcut keys={["缩放滑杆"]} value="精确调整缩放" />
+                    <Shortcut keys={["Ctrl / Cmd", "拖动"]} value="框选多个节点" />
+                    <Shortcut keys={["Shift / Ctrl / Cmd", "点击"]} value="追加选择节点" />
+                    <Shortcut keys={["Ctrl / Cmd", "A"]} value="全选节点" />
+                    <Shortcut keys={["Ctrl / Cmd", "C / V"]} value="复制 / 粘贴节点，或粘贴剪切板文本/图片" />
+                    <Shortcut keys={["Ctrl / Cmd", "Z"]} value="撤销" />
+                    <Shortcut keys={["Ctrl / Cmd", "Shift", "Z"]} value="重做" />
+                    <Shortcut keys={["Ctrl / Cmd", "Y"]} value="重做" />
+                    <Shortcut keys={["Delete / Backspace"]} value="删除选中" />
+                    <Shortcut keys={["Esc"]} value="取消选择并关闭浮层" />
+                    <Shortcut keys={["拖入图片/视频/音频"]} value="上传到画布" />
+                </div>
+            </Modal>
+        </>
+    );
+}
+
+function MenuLabel({ text, shortcut }: { text: string; shortcut: string }) {
+    return (
+        <span className="flex min-w-36 items-center justify-between gap-8">
+            <span>{text}</span>
+            <span className="text-xs opacity-45">{shortcut}</span>
+        </span>
+    );
+}
+
+function CompactAgentStatus({ status, onClick }: { status: { connected: boolean; enabled: boolean; activity: string }; onClick: () => void }) {
+    const colorTheme = useThemeStore((state) => state.theme);
+    const theme = canvasThemes[colorTheme];
+    const label = status.connected ? "Codex 已连接" : status.enabled ? `Codex ${status.activity || "连接中"}` : "Codex 未连接";
+    const dotColor = status.connected ? "#22c55e" : status.enabled ? "#f59e0b" : theme.node.muted;
+    return (
+        <button type="button" className="flex h-8 items-center gap-1.5 text-xs transition hover:opacity-75" style={{ color: status.connected ? "#16a34a" : status.enabled ? "#d97706" : theme.node.muted }} onClick={onClick} title="打开本地 Codex 面板">
+            <span className="size-2 rounded-full" style={{ background: dotColor }} />
+            <span className="max-w-[140px] truncate">{label}</span>
+        </button>
+    );
+}
+
+function Shortcut({ keys, value }: { keys: string[]; value: string }) {
+    return (
+        <div className="grid grid-cols-[minmax(0,1fr)_120px] items-center gap-6 rounded-lg px-1 py-1.5">
+            <span className="flex min-w-0 flex-wrap items-center gap-1.5">
+                {keys.map((key, index) => (
+                    <span key={`${key}-${index}`} className="flex items-center gap-1.5">
+                        {index ? <span className="text-xs opacity-35">+</span> : null}
+                        <kbd
+                            className="min-w-9 rounded-md border px-2.5 py-1.5 text-center text-xs font-medium leading-none shadow-[inset_0_-1px_0_rgba(0,0,0,.08),0_1px_2px_rgba(0,0,0,.06)]"
+                            style={{ borderColor: "rgba(120,113,108,.28)", background: "linear-gradient(#fff, rgba(245,245,244,.92))", color: "rgb(68,64,60)" }}
+                        >
+                            {key}
+                        </kbd>
+                    </span>
+                ))}
+            </span>
+            <span className="text-right text-sm opacity-55">{value}</span>
+        </div>
+    );
+}
+
+function imageExtension(dataUrl: string) {
+    return dataUrl.match(/^data:image[/]([^;]+)/)?.[1] || dataUrl.match(/image[/]([^;]+)/)?.[1] || "png";
+}
+
+function audioExtension(mimeType?: string) {
+    if (mimeType?.includes("wav")) return "wav";
+    if (mimeType?.includes("opus")) return "opus";
+    if (mimeType?.includes("aac")) return "aac";
+    if (mimeType?.includes("flac")) return "flac";
+    if (mimeType?.includes("pcm")) return "pcm";
+    return "mp3";
+}
+
+function imageMetadata(image: UploadedImage): CanvasNodeMetadata {
+    return { content: image.url, storageKey: image.storageKey, status: "success", naturalWidth: image.width, naturalHeight: image.height, bytes: image.bytes, mimeType: image.mimeType };
+}
+
+function finishStoryboardGenerationMetadata(metadata?: CanvasNodeMetadata): CanvasNodeMetadata {
+    const startedAt = metadata?.storyboardGenerationStartedAt || metadata?.storyboardGenerationQueuedAt;
+    return {
+        storyboardGenerationPhase: undefined,
+        storyboardGenerationRetryDelayMs: undefined,
+        storyboardGenerationElapsedMs: startedAt ? Math.max(0, Date.now() - startedAt) : undefined,
+    };
+}
+
+function videoMetadata(video: UploadedFile): CanvasNodeMetadata {
+    return { content: video.url, storageKey: video.storageKey, status: "success", naturalWidth: video.width, naturalHeight: video.height, bytes: video.bytes, mimeType: video.mimeType || "video/mp4", durationMs: video.durationMs };
+}
+
+function audioMetadata(audio: UploadedFile): CanvasNodeMetadata {
+    return { content: audio.url, storageKey: audio.storageKey, status: "success", bytes: audio.bytes, mimeType: audio.mimeType || "audio/mpeg", durationMs: audio.durationMs };
+}
+
+function buildImageGenerationMetadata(type: CanvasImageGenerationType, config: AiConfig, count: number, references: ReferenceImage[]): CanvasNodeMetadata {
+    return {
+        generationType: type,
+        model: config.model,
+        size: config.size,
+        quality: config.quality,
+        count,
+        references: references.map(referenceUrl).filter((url): url is string => Boolean(url)),
+    };
+}
+
+function buildAudioGenerationMetadata(config: AiConfig): CanvasNodeMetadata {
+    return {
+        model: config.model,
+        audioVoice: config.audioVoice,
+        audioFormat: config.audioFormat,
+        audioSpeed: config.audioSpeed,
+        audioInstructions: config.audioInstructions,
+    };
+}
+
+function referenceUrl(image: ReferenceImage) {
+    return image.storageKey || image.url || (!image.dataUrl.startsWith("data:") ? image.dataUrl : undefined);
+}
+
+function generationReferenceUrls(context: { referenceImages: ReferenceImage[]; referenceVideos: Array<{ storageKey?: string; url?: string }>; referenceAudios?: Array<{ storageKey?: string; url?: string }> }) {
+    return [
+        ...context.referenceImages.map(referenceUrl).filter((url): url is string => Boolean(url)),
+        ...context.referenceVideos.map((video) => video.storageKey || video.url).filter((url): url is string => Boolean(url)),
+        ...(context.referenceAudios || []).map((audio) => audio.storageKey || audio.url).filter((url): url is string => Boolean(url)),
+    ];
+}
+
+async function resolveMetadataReferences(metadata: CanvasNodeMetadata) {
+    if (metadata.generationType !== "edit") return [];
+    if (!metadata.references?.length) return null;
+    const references = await Promise.all(
+        metadata.references.map(async (url, index) => {
+            const dataUrl = url.startsWith("image:") ? await resolveImageUrl(url, "") : url;
+            return dataUrl ? { id: `${index}`, name: `reference-${index}.png`, type: "image/png", dataUrl, storageKey: url.startsWith("image:") ? url : undefined } : null;
+        }),
+    );
+    return references.every(Boolean) ? (references as ReferenceImage[]) : null;
+}
+
+async function resolveProductReferenceImages(node: CanvasNodeData) {
+    const references = node.metadata?.productReferenceImages || [];
+    const resolved = await Promise.all(
+        references.map(async (reference): Promise<ReferenceImage | null> => {
+            const url = await resolveImageUrl(reference.storageKey, reference.url);
+            if (!url) return null;
+            const dataUrl = await imageToDataUrl({ url, storageKey: reference.storageKey });
+            if (!dataUrl) return null;
+            return {
+                id: reference.id,
+                name: reference.name,
+                type: reference.mimeType || "image/png",
+                dataUrl,
+                url,
+                storageKey: reference.storageKey,
+            };
+        }),
+    );
+    return resolved.filter((reference): reference is ReferenceImage => Boolean(reference));
+}
+
+async function resolveCanvasImageReference(node: CanvasNodeData): Promise<ReferenceImage | null> {
+    const content = node.metadata?.content;
+    if (!content) return null;
+    const url = await resolveImageUrl(node.metadata?.storageKey, content);
+    if (!url) return null;
+    const dataUrl = await imageToDataUrl({ url, storageKey: node.metadata?.storageKey });
+    if (!dataUrl) return null;
+    return {
+        id: node.id,
+        name: `${node.title || node.id}.png`,
+        type: node.metadata?.mimeType || "image/png",
+        dataUrl,
+        url,
+        storageKey: node.metadata?.storageKey,
+    };
+}
+
+async function hydrateCanvasImages(nodes: CanvasNodeData[]) {
+    return Promise.all(
+        nodes.map(async (node) => {
+            const productReferenceImages = node.metadata?.productReferenceImages?.length
+                ? await Promise.all(
+                      node.metadata.productReferenceImages.map(async (reference) => ({
+                          ...reference,
+                          url: await resolveImageUrl(reference.storageKey, reference.url),
+                      })),
+                  )
+                : undefined;
+            const hydratedNode = productReferenceImages ? { ...node, metadata: { ...node.metadata, productReferenceImages } } : node;
+            const content = hydratedNode.metadata?.content;
+            if ((hydratedNode.type === CanvasNodeType.Video || hydratedNode.type === CanvasNodeType.Audio) && hydratedNode.metadata?.storageKey)
+                return { ...hydratedNode, metadata: { ...hydratedNode.metadata, content: await resolveMediaUrl(hydratedNode.metadata.storageKey, content) } };
+            if (hydratedNode.type !== CanvasNodeType.Image || !content) return hydratedNode;
+            if (hydratedNode.metadata?.storageKey) return { ...hydratedNode, metadata: { ...hydratedNode.metadata, content: await resolveImageUrl(hydratedNode.metadata.storageKey, content) } };
+            if (!content.startsWith("data:image/")) return hydratedNode;
+            return { ...hydratedNode, metadata: { ...hydratedNode.metadata, ...imageMetadata(await uploadImage(content)) } };
+        }),
+    );
+}
+
+async function hydrateAssistantImages(sessions: CanvasAssistantSession[]) {
+    const hydrateItem = async <T extends { dataUrl?: string; storageKey?: string }>(item: T) => {
+        if (item.storageKey) return { ...item, dataUrl: await resolveImageUrl(item.storageKey, item.dataUrl) };
+        if (item.dataUrl?.startsWith("data:image/")) {
+            const image = await uploadImage(item.dataUrl);
+            return { ...item, dataUrl: image.url, storageKey: image.storageKey };
+        }
+        return item;
+    };
+    return Promise.all(
+        sessions.map(async (session) => ({
+            ...session,
+            messages: await Promise.all(
+                session.messages.map(async (message) => ({
+                    ...message,
+                    references: await Promise.all((message.references || []).map(hydrateItem)),
+                })),
+            ),
+        })),
+    );
+}
+
+function getGenerationCount(count: string) {
+    return Math.max(1, Math.min(15, Math.floor(Math.abs(Number(count)) || 1)));
+}
+
+function applyNodeConfigPatch(node: CanvasNodeData, patch: Partial<CanvasNodeData["metadata"]>) {
+    const safePatch = patch || {};
+    const next = { ...node, metadata: { ...node.metadata, ...safePatch } };
+    const spec = node.type === CanvasNodeType.Video ? NODE_DEFAULT_SIZE[CanvasNodeType.Video] : NODE_DEFAULT_SIZE[CanvasNodeType.Image];
+    const size = typeof safePatch.size === "string" && !node.metadata?.content ? nodeSizeFromRatio(safePatch.size, spec.width, spec.height) : null;
+    return size && (node.type === CanvasNodeType.Image || node.type === CanvasNodeType.Video) ? { ...next, ...size, position: { x: node.position.x + node.width / 2 - size.width / 2, y: node.position.y + node.height / 2 - size.height / 2 } } : next;
+}
+
+function findGroupDropTarget(movedIds: Set<string>, nodes: CanvasNodeData[]) {
+    if (nodes.some((node) => movedIds.has(node.id) && node.type === CanvasNodeType.Group)) return null;
+    const movingNodes = nodes.filter((node) => movedIds.has(node.id) && node.type !== CanvasNodeType.Group);
+    if (!movingNodes.length) return null;
+    return (
+        [...nodes].reverse().find((group) => {
+            if (group.type !== CanvasNodeType.Group || movedIds.has(group.id)) return false;
+            return movingNodes.some((node) => {
+                const centerX = node.position.x + node.width / 2;
+                const centerY = node.position.y + node.height / 2;
+                return centerX >= group.position.x && centerX <= group.position.x + group.width && centerY >= group.position.y && centerY <= group.position.y + group.height;
+            });
+        }) || null
+    );
+}
+
+function snapNodesIntoGroup(movedIds: Set<string>, nodes: CanvasNodeData[], group: CanvasNodeData) {
+    const movingNodes = nodes.filter((node) => movedIds.has(node.id) && node.type !== CanvasNodeType.Group);
+    if (!movingNodes.length) return nodes;
+    const pad = 24;
+    const bounds = nodeBounds(movingNodes);
+    const left = group.position.x + pad;
+    const top = group.position.y + pad;
+    const right = group.position.x + group.width - pad;
+    const bottom = group.position.y + group.height - pad;
+    const dx = bounds.right - bounds.left > right - left ? left - bounds.left : bounds.left < left ? left - bounds.left : bounds.right > right ? right - bounds.right : 0;
+    const dy = bounds.bottom - bounds.top > bottom - top ? top - bounds.top : bounds.top < top ? top - bounds.top : bounds.bottom > bottom ? bottom - bounds.bottom : 0;
+    return nodes.map((node) => {
+        if (!movedIds.has(node.id) || node.type === CanvasNodeType.Group) return node;
+        return { ...node, position: { x: node.position.x + dx, y: node.position.y + dy }, metadata: { ...node.metadata, groupId: group.id } };
+    });
+}
+
+function nodeBounds(nodes: CanvasNodeData[]) {
+    return nodes.reduce(
+        (acc, node) => ({
+            left: Math.min(acc.left, node.position.x),
+            top: Math.min(acc.top, node.position.y),
+            right: Math.max(acc.right, node.position.x + node.width),
+            bottom: Math.max(acc.bottom, node.position.y + node.height),
+        }),
+        { left: Infinity, top: Infinity, right: -Infinity, bottom: -Infinity },
+    );
+}
+
+function findContainingGroupId(node: CanvasNodeData, nodes: CanvasNodeData[]) {
+    const centerX = node.position.x + node.width / 2;
+    const centerY = node.position.y + node.height / 2;
+    return (
+        [...nodes]
+            .reverse()
+            .find((group) => group.type === CanvasNodeType.Group && group.id !== node.id && centerX >= group.position.x && centerX <= group.position.x + group.width && centerY >= group.position.y && centerY <= group.position.y + group.height)?.id ||
+        undefined
+    );
+}
+
+function getConnectionTargetAnchor(node: CanvasNodeData, current: ConnectionHandle) {
+    return {
+        x: current.handleType === "source" ? node.position.x : node.position.x + node.width,
+        y: node.position.y + node.height / 2,
+    };
+}
+
+function normalizeConnection(firstNodeId: string, secondNodeId: string, nodes: CanvasNodeData[], firstHandleType: "source" | "target") {
+    const first = nodes.find((node) => node.id === firstNodeId);
+    const second = nodes.find((node) => node.id === secondNodeId);
+    if (!first || !second || first.id === second.id) return null;
+    if (first.type === CanvasNodeType.Group || second.type === CanvasNodeType.Group) return null;
+    if (first.type === CanvasNodeType.Config && second.type === CanvasNodeType.Config) return null;
+    if (second.type === CanvasNodeType.Config) return { fromNodeId: first.id, toNodeId: second.id };
+    if (first.type === CanvasNodeType.Config && firstHandleType === "target") return { fromNodeId: second.id, toNodeId: first.id };
+    if (first.type === CanvasNodeType.Config) return { fromNodeId: first.id, toNodeId: second.id };
+    return { fromNodeId: first.id, toNodeId: second.id };
+}
+
+function getInputSummary(inputs: NodeGenerationInput[]) {
+    return {
+        textCount: inputs.filter((input) => input.type === "text").length,
+        imageCount: inputs.filter((input) => input.type === "image").length,
+        videoCount: inputs.filter((input) => input.type === "video").length,
+        audioCount: inputs.filter((input) => input.type === "audio").length,
+    };
+}
+
+function buildGenerationConfig(config: AiConfig, node: CanvasNodeData | undefined, mode: CanvasNodeGenerationMode): AiConfig {
+    const defaultModel = mode === "image" ? config.imageModel : mode === "video" ? config.videoModel : mode === "audio" ? config.audioModel : config.textModel;
+    return {
+        ...config,
+        model: node?.metadata?.model || defaultModel || (mode === "audio" ? defaultConfig.audioModel : config.model || defaultConfig.model),
+        quality: node?.metadata?.quality || config.quality || defaultConfig.quality,
+        size: node?.metadata?.size || config.size || defaultConfig.size,
+        videoSeconds: node?.metadata?.seconds || config.videoSeconds || defaultConfig.videoSeconds,
+        vquality: node?.metadata?.vquality || config.vquality || defaultConfig.vquality,
+        videoGenerateAudio: node?.metadata?.generateAudio || config.videoGenerateAudio || defaultConfig.videoGenerateAudio,
+        videoWatermark: node?.metadata?.watermark || config.videoWatermark || defaultConfig.videoWatermark,
+        audioVoice: node?.metadata?.audioVoice || config.audioVoice || defaultConfig.audioVoice,
+        audioFormat: node?.metadata?.audioFormat || config.audioFormat || defaultConfig.audioFormat,
+        audioSpeed: node?.metadata?.audioSpeed || config.audioSpeed || defaultConfig.audioSpeed,
+        audioInstructions: node?.metadata?.audioInstructions || config.audioInstructions || defaultConfig.audioInstructions,
+        count: String(node?.metadata?.count || (mode === "image" ? config.canvasImageCount || config.count : config.count) || defaultConfig.count),
+    };
+}
+
+function resetInterruptedGeneration(nodes: CanvasNodeData[]) {
+    return nodes.map((node) => (node.metadata?.status === "loading" ? { ...node, metadata: { ...node.metadata, status: "error" as const, errorDetails: "页面刷新后生成已中断，请重新生成。" } } : node));
+}
+
+function isGenerationCanceled(error: unknown) {
+    return error instanceof Error && (error.message === "请求已取消" || error.name === "AbortError");
+}
+
+function findRetrySourceNode(nodeId: string, nodes: CanvasNodeData[], connections: CanvasConnection[]) {
+    const queue = connections.filter((connection) => connection.toNodeId === nodeId).map((connection) => connection.fromNodeId);
+    const visited = new Set<string>();
+    while (queue.length) {
+        const id = queue.shift()!;
+        if (visited.has(id)) continue;
+        visited.add(id);
+        const node = nodes.find((item) => item.id === id);
+        if (node?.type === CanvasNodeType.Config) return node;
+        connections.filter((connection) => connection.toNodeId === id).forEach((connection) => queue.push(connection.fromNodeId));
+    }
+    return null;
+}
+
+function sourceNodeReferenceImages(node: CanvasNodeData | null) {
+    if (!node || node.type !== CanvasNodeType.Image || !node.metadata?.content) return [];
+    return [
+        {
+            id: node.id,
+            name: `${node.title || node.id}.png`,
+            type: node.metadata.mimeType || "image/png",
+            dataUrl: node.metadata.content,
+            storageKey: node.metadata.storageKey,
+        },
+    ];
+}
+
+function isAudioFile(file: File) {
+    return file.type.startsWith("audio/") || /\.(mp3|wav)$/i.test(file.name);
+}
+
+function isHiddenBatchChild(node: CanvasNodeData, nodes: CanvasNodeData[], collapsingBatchIds?: Set<string>) {
+    const rootId = node.metadata?.batchRootId;
+    if (!rootId) return false;
+    const root = nodes.find((item) => item.id === rootId);
+    if (root && collapsingBatchIds?.has(rootId)) return false;
+    return Boolean(root && !root.metadata?.imageBatchExpanded);
+}
+
+function isHiddenBatchConnectionEndpoint(node: CanvasNodeData, nodes: CanvasNodeData[]) {
+    const rootId = node.metadata?.batchRootId;
+    if (!rootId) return false;
+    const root = nodes.find((item) => item.id === rootId);
+    return Boolean(root && !root.metadata?.imageBatchExpanded);
+}
+
+function buildAngleLabel(params: CanvasImageAngleParams) {
+    const horizontal = params.horizontalAngle === 0 ? "正面视角" : params.horizontalAngle > 0 ? `向右旋转 ${params.horizontalAngle} 度` : `向左旋转 ${Math.abs(params.horizontalAngle)} 度`;
+    const pitch = params.pitchAngle === 0 ? "水平视角" : params.pitchAngle > 0 ? `俯视 ${params.pitchAngle} 度` : `仰视 ${Math.abs(params.pitchAngle)} 度`;
+    return `AI 多角度：${horizontal}，${pitch}，镜头距离 ${params.cameraDistance.toFixed(1)}，${params.wideAngle ? "广角" : "标准"}镜头`;
+}
+
+function buildAnglePrompt(params: CanvasImageAngleParams) {
+    return `基于参考图重新生成同一主体的新视角，保持主体、颜色、材质和画面风格一致，不要只做透视变形。${buildAngleLabel(params)}。`;
 }

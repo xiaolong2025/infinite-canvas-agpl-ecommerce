@@ -1,4 +1,5 @@
 export const APP_VERSION = __APP_VERSION__ || "dev";
+export const APP_BUILD_SHA = __APP_BUILD_SHA__ || "dev";
 
 export const DOCS_URL = import.meta.env.VITE_DOC_URL || "https://docs.canvas.best";
 

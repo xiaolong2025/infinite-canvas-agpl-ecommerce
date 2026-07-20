@@ -1,0 +1,362 @@
+---
+title: YigeAI 开发版自动部署方案
+description: 无限画布二次开发版本的服务器部署、自动更新与回滚约定
+---
+
+# YigeAI 开发版自动部署方案
+
+## 目标
+
+本方案用于把当前无限画布源码的二次开发版本部署到 YigeAI 服务器，满足：
+
+1. 用户访问的是当前二次开发版本，不是作者的远程 `latest` 镜像。
+2. 开发者推送指定分支后，服务器自动构建并更新。
+3. 初期支持 1 至 2 名用户使用。
+4. 无限画布更新不重启、不覆盖、不修改现有 YigeAI API 中转服务。
+5. 新版本异常时，可以切回上一版。
+
+本方案不是重新开发无限画布，也不是复刻项目。它只负责把当前源码构建成并运行成一个属于本项目的版本。
+
+## 当前项目事实
+
+- 前端目录：`web`
+- 技术栈：Vite、React、TypeScript
+- 运行镜像：构建阶段使用 Bun，运行阶段使用 Nginx
+- 当前主应用无独立业务后端
+- 默认容器端口：`3000`
+- 画布、素材、生成记录和 API Key 默认保存在用户浏览器本地
+- 当前 `docker-compose.yml` 使用作者镜像：
+
+```yaml
+image: ghcr.io/basketikun/infinite-canvas:latest
+```
+
+这个配置必须改为本项目自己的镜像地址，不能继续作为生产部署配置。
+
+## 部署边界
+
+### 必须保持不变
+
+- 不重启或重建 YigeAI Sub2API、PostgreSQL、Redis。
+- 不修改现有 `api.yigeai.work` 的 API 路由。
+- 不把无限画布的构建任务放到 RackNerd API 源站执行。
+- 不把 API Key 写入源码、Dockerfile、镜像或 GitHub Actions 日志。
+- 不把 Vite 开发服务器直接暴露到公网。
+- 不使用 `latest` 作为唯一正式版本标识。
+
+### 首期只做
+
+- 无限画布前端独立部署。
+- 独立域名，建议为 `canvas.yigeai.work`。
+- 1 至 2 名用户内测。
+- 浏览器本地保存画布和素材。
+- 每个用户使用独立、限额的 YigeAI API Key。
+- 推送 `develop` 分支后自动构建和部署。
+
+### 首期不做
+
+- 云端画布同步。
+- 多人实时协作。
+- 用户注册、登录和权限系统。
+- 服务端素材库。
+- 服务端统一 API Key。
+- 在线计费、配额和公开注册。
+
+## 推荐架构
+
+```text
+本地无限画布源码
+  -> Git 私有仓库或个人 Fork
+  -> GitHub Actions
+  -> 构建自有 Docker 镜像
+  -> 私有 GHCR 镜像仓库
+  -> NovixLink 入口机
+  -> Nginx canvas.yigeai.work
+  -> 无限画布容器
+  -> 用户浏览器直连 api.yigeai.work
+```
+
+无限画布容器只提供静态网页。AI 请求继续由浏览器按照项目现有逻辑调用用户填写的 OpenAI 兼容接口。
+
+## 代码与版本规则
+
+### 仓库
+
+建立用户自己的 GitHub 仓库或 Fork。原项目的 `origin` 不应继续作为二次开发版本的发布目标。
+
+建议分支：
+
+- `main`：已验证版本。
+- `develop`：开发版本，推送后自动部署给内测用户。
+
+当前本地已有未提交修改。首次发布前必须由开发者明确整理并提交，不能依赖服务器读取本机工作区。
+
+### 镜像
+
+镜像使用用户自己的地址，例如：
+
+```text
+ghcr.io/<owner>/infinite-canvas:<git-sha>
+```
+
+同时可以维护一个方便内测的别名：
+
+```text
+ghcr.io/<owner>/infinite-canvas:dev
+```
+
+服务器实际部署记录必须保存完整的 Git SHA。`dev` 只是入口别名，不能作为回滚依据。
+
+## 当前已落地的部署资产
+
+当前源码已包含以下本地部署草案：
+
+```text
+docker-compose.server.yml
+.github/workflows/deploy-dev.yml
+ops/deploy-infinite-canvas.sh
+ops/nginx/canvas.yigeai.work.conf
+```
+
+生产镜像由当前仓库源码构建，镜像地址由 GitHub 当前仓库所有者自动决定：
+
+```text
+ghcr.io/${github.repository_owner}/infinite-canvas:<完整 Git SHA>
+```
+
+现有根目录 `docker-compose.yml` 仍是作者体验配置，不用于用户的服务器部署。服务器只允许使用 `docker-compose.server.yml`，部署脚本同时拒绝作者镜像和 `latest` 标签。
+
+构建产物包含：
+
+```text
+/build-info.json
+```
+
+内容记录当前版本号和构建 Git SHA。页面版本弹窗也显示同一构建 SHA，用于证明公网加载的是哪次提交。
+
+生产容器保留以下同源代理：
+
+```text
+/api/yigeai
+/yigeai-api
+/yigeai-text-api
+```
+
+这些代理只把浏览器请求转发到现有 `https://api.yigeai.work`，不修改、重启或重新部署 YigeAI API。
+
+## 自动发布流程
+
+### 本地开发
+
+```text
+本地运行 Vite 开发环境
+  -> 修改功能
+  -> 浏览器本地验证
+  -> 提交到 develop
+```
+
+本地 HMR 只用于开发，不作为公网服务。
+
+### GitHub Actions
+
+`develop` 分支推送触发以下步骤：
+
+1. 检出当前提交。
+2. 安装 `web` 依赖。
+3. 执行 `bun run typecheck`。
+4. 执行 `bun run build`。
+5. 构建 Linux amd64 Docker 镜像。
+6. 推送带 Git SHA 的镜像。
+7. 更新 `dev` 标签。
+8. NovixLink 入口机的 systemd timer 每两分钟拉取 `dev` 标签。
+9. 入口机从镜像 OCI label 读取完整 Git SHA，并只部署对应的不可变 SHA 标签。
+10. 服务器部署脚本返回健康检查结果；GitHub Actions 记录当前提交和镜像标签。
+
+构建失败时不得进入服务器切换步骤。
+
+推送 `develop` 后，Actions 会立即进入队列。网站更新时间取决于排队、前端构建、镜像推送和健康检查耗时，首次正式运行后应从 Actions 日志记录实际时长；在取得真实数据前不承诺固定分钟数。
+
+### GitHub 配置项
+
+GitHub Actions 只使用仓库自动提供的 `GITHUB_TOKEN` 发布 GHCR 镜像，不保存服务器密码或 SSH 私钥。GHCR 包必须允许 NovixLink 入口机拉取；首期使用公开包，后续如果改为私有包，需要单独配置只读 `read:packages` 凭据。
+
+仓库必须是用户自己的仓库或 Fork；当前本地 `origin` 仍指向作者仓库，因此 workflow 目前只是本地草案，不能直接推送启用。
+
+### 服务器部署
+
+服务器使用独立目录，例如：
+
+```text
+/opt/infinite-canvas/
+  docker-compose.server.yml
+  deploy.sh
+  canvas.yigeai.work.conf
+  current-version
+  logs/
+  nginx-backups/
+```
+
+首次服务器安装时的文件映射：
+
+```text
+docker-compose.server.yml                 -> /opt/infinite-canvas/docker-compose.server.yml
+ops/deploy-infinite-canvas.sh             -> /opt/infinite-canvas/deploy.sh
+ops/nginx/canvas.yigeai.work.conf         -> /opt/infinite-canvas/canvas.yigeai.work.conf
+```
+
+服务器 Compose 不再使用作者镜像，而是使用环境变量指定本项目镜像：
+
+```yaml
+services:
+  app:
+    image: ${CANVAS_IMAGE}
+    container_name: ${CANVAS_CONTAINER}
+    ports:
+      - "127.0.0.1:${CANVAS_PORT}:3000"
+    restart: unless-stopped
+```
+
+部署脚本必须接收完整镜像标签，并按以下顺序执行：
+
+1. 拉取指定镜像。
+2. 选择当前未使用的本地端口，使用 `3100` 或 `3101`。
+3. 启动候选容器。
+4. 执行本机健康检查：
+
+```bash
+curl --fail --silent --show-error http://127.0.0.1:<candidate-port>/healthz
+```
+
+5. 检查首页引用的带哈希 JS 和 CSS 可以加载。
+6. 检查候选 `/build-info.json` 与待部署 Git SHA 一致。
+7. 健康检查失败时删除候选容器，保留当前线上容器。
+8. 健康检查通过后切换 Nginx 上游端口。
+9. 执行 `nginx -t`。
+10. 执行 Nginx reload。
+11. 检查公网首页和公网 `/build-info.json`。
+12. 部署前后分别检查 `YIGEAI_HEALTH_URL`。
+13. 记录当前镜像标签和 Git SHA。
+14. 保留上一版本容器，至少保留一个可回滚版本。
+
+## Nginx 要求
+
+无限画布使用独立的 Nginx server block：
+
+```text
+canvas.yigeai.work -> 127.0.0.1:3100 或 127.0.0.1:3101
+```
+
+不能把无限画布配置混入 `api.yigeai.work` 的代理规则。
+
+静态缓存策略：
+
+- `index.html`：禁止长期缓存。
+- `config.js`：禁止缓存。
+- 带哈希的 JS、CSS、图片：允许长期缓存。
+
+这样新版本切换后，用户刷新页面即可拿到新入口文件，同时不需要关闭 API 服务。
+
+## 回滚规则
+
+以下情况自动回滚：
+
+- 候选容器无法启动。
+- 候选容器首页不是 `200`。
+- Nginx 配置检查失败。
+- 公网域名切换后不是 `200`。
+- 页面加载出现明显 JavaScript 初始化错误。
+
+回滚动作：
+
+1. Nginx 切回上一版本端口。
+2. 执行 Nginx reload。
+3. 保留失败镜像和日志，不立即删除。
+4. 记录失败 Git SHA。
+5. 不执行 `docker compose down`，不影响 YigeAI API。
+
+服务器手动回滚命令：
+
+```bash
+/opt/infinite-canvas/deploy.sh rollback
+```
+
+第一次成功部署之前没有无限画布旧版本可回滚。第一次成功后再部署第二个版本，才能完整验收双槽位回滚。
+
+## 数据与安全
+
+- API Key 继续由用户在浏览器中配置。
+- 1 至 2 名用户必须使用独立 Key，不共用一个高权限 Key。
+- 不在前端代码中内置 YigeAI Key。
+- 网站域名确定后不要频繁更换，否则浏览器本地数据会分散到不同域名。
+- 当前项目本地存储结构可能变化。涉及画布数据结构的改动，发布前必须先导出或备份测试用户数据。
+- 项目使用 AGPL-3.0。二次开发、网络提供和发布前必须按许可证要求处理源代码和版权信息。
+- 不把 API Key、GHCR Token 或 SSH 私钥写进上述 Compose、脚本、Dockerfile或源码；私有 GHCR 的服务器登录由首次服务器配置单独完成。
+
+## 服务器预检
+
+正式部署前，只读执行：
+
+```bash
+hostname
+free -h
+df -h /
+uptime
+docker version
+docker ps
+ss -lntp
+nginx -t
+```
+
+预检必须确认：
+
+- 目标入口机可登录。
+- Docker 可用。
+- Nginx 可用。
+- `3100`、`3101` 未被其他服务占用。
+- 至少保留一份旧版本回滚容器。
+- 入口机磁盘有足够空间保存当前版和上一版镜像。
+
+如果入口机不适合运行 Docker，则改为本地构建 `web/dist`，上传到入口机的版本目录，由 Nginx 直接提供静态文件。不要退回到 RackNerd API 源站编译。
+
+入口机通过 `/opt/infinite-canvas/poll-and-deploy.sh` 和 systemd timer 自动检查新镜像。该轮询器只调用 Canvas 自己的部署脚本，不管理或重启 YigeAI API、Sub2API、PostgreSQL、Redis 或监控容器。
+
+## 验收标准
+
+第一次上线必须全部满足：
+
+1. `https://canvas.yigeai.work/` 返回 `200`。
+2. 页面显示当前二次开发版本标识。
+3. 用户可以打开画布并执行基础拖拽、缩放、添加节点和刷新。
+4. 页面可以通过用户配置的 YigeAI Base URL 发起 API 请求。
+5. YigeAI API 原有健康检查仍然正常。
+6. 新版本部署期间 `api.yigeai.work` 不发生重启。
+7. 自动部署失败时旧版本仍可访问。
+8. 手动切换到上一镜像标签后可以恢复。
+9. GitHub Actions 能记录部署提交和镜像标签。
+10. 不执行真实付费生图作为默认部署检查；真实生图只能在用户明确批准后验收。
+
+## 开发会话执行要求
+
+后续“无限画布”开发会话收到本方案后，应按以下顺序执行：
+
+1. 先读取本文件和根目录 `AGENTS.md`。
+2. 盘点当前 Git 未提交修改，不回滚用户改动。
+3. 创建自有镜像地址和服务器 Compose 配置草案。
+4. 创建 CI 构建和部署脚本草案。
+5. 先做本地构建验证和静态页面验收。
+6. 展示将要修改的服务器文件、域名和密钥变量。
+7. 只有用户确认后，才连接服务器、修改 Nginx、配置 SSH 部署密钥或触发公网部署。
+8. 部署后提供 Git SHA、镜像标签、健康检查结果和回滚命令。
+
+## 完成定义
+
+本方案只有在以下证据全部出现时，才可称为“开发版已部署”：
+
+- 服务器正在运行用户自己的镜像。
+- 镜像标签对应当前 Git SHA。
+- 公网域名加载的是当前二次开发页面。
+- 用户浏览器可以完成基础画布操作。
+- YigeAI API 未被中断。
+- 部署失败可以回到上一版本。
+
+仅仅“代码已经写好”“镜像构建成功”或“容器启动”不算完成。

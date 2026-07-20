@@ -1,0 +1,12 @@
+[Unit]
+Description=Poll GHCR for Infinite Canvas develop releases
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=2min
+AccuracySec=15s
+Persistent=true
+Unit=infinite-canvas-deploy.service
+
+[Install]
+WantedBy=timers.target

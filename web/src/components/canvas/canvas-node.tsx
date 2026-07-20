@@ -6,6 +6,7 @@ import { canvasThemes } from "@/lib/canvas-theme";
 import { formatBytes } from "@/lib/image-utils";
 import { getNodeDefinition } from "@/lib/canvas/node-registry";
 import { buildNodeContext } from "@/lib/canvas/plugin-node-context";
+import { workflowKindOf } from "@/lib/canvas/ecommerce-workflow";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { CanvasResourceMentionTextarea } from "./canvas-resource-mention-textarea";
 import { CanvasNodeType, type CanvasNodeData, type Position } from "@/types/canvas";
@@ -26,6 +27,7 @@ type CanvasNodeProps = {
     editRequestNonce?: number;
     showPanel: boolean;
     showImageInfo: boolean;
+    resourceLabel?: CanvasResourceReference;
     mentionReferences?: CanvasResourceReference[];
     pluginHost?: CanvasPluginHost;
     registryVersion?: number;
@@ -40,7 +42,6 @@ type CanvasNodeProps = {
     batchRecovering?: boolean;
     batchMotion?: { x: number; y: number; index: number };
     onMouseDown: (event: React.MouseEvent, nodeId: string) => void;
-    onSelectCapture?: (event: React.MouseEvent, nodeId: string) => void;
     onHoverStart: (nodeId: string) => void;
     onHoverEnd: (nodeId: string) => void;
     onConnectStart: (event: React.MouseEvent, nodeId: string, handleType: "source" | "target") => void;
@@ -88,6 +89,7 @@ export const CanvasNode = React.memo(function CanvasNode({
     editRequestNonce = 0,
     showPanel,
     showImageInfo,
+    resourceLabel,
     mentionReferences = [],
     pluginHost,
     renderPanel,
@@ -101,7 +103,6 @@ export const CanvasNode = React.memo(function CanvasNode({
     batchRecovering = false,
     batchMotion,
     onMouseDown,
-    onSelectCapture,
     onHoverStart,
     onHoverEnd,
     onConnectStart,
@@ -118,7 +119,7 @@ export const CanvasNode = React.memo(function CanvasNode({
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const [hovered, setHovered] = useState(false);
     const definition = getNodeDefinition(data.type);
-    const pluginContext = useMemo<CanvasNodeContext | null>(() => (pluginHost ? buildNodeContext(pluginHost, data, theme, scale, isSelected) : null), [pluginHost, data, theme, scale, isSelected]);
+    const pluginContext = useMemo<CanvasNodeContext | null>(() => (pluginHost ? buildNodeContext(pluginHost, data, theme, scale) : null), [pluginHost, data, theme, scale]);
     const [isEditingContent, setIsEditingContent] = useState(false);
     const [isEditingTitle, setIsEditingTitle] = useState(false);
     const [titleDraft, setTitleDraft] = useState(data.title || "");
@@ -127,14 +128,7 @@ export const CanvasNode = React.memo(function CanvasNode({
     const hasAudioContent = data.type === CanvasNodeType.Audio && Boolean(data.metadata?.content);
     const isGroup = data.type === CanvasNodeType.Group;
     const isBatchRoot = data.type === CanvasNodeType.Image && Boolean(data.metadata?.isBatchRoot) && batchCount > 1;
-    // 支持「交互/移动」开关的节点:移动态(默认)内容不吃指针,拖动整块;交互态内容可操作。
-    // forceInteractive(如编辑态)强制可交互;空态(无内容)始终可交互,避免上传/生成按钮点不动。
-    const supportsInteractionToggle = Boolean(definition?.interactionToggle);
-    const forceInteractive = supportsInteractionToggle ? Boolean(definition?.forceInteractive?.(data)) : false;
-    const contentInteractive = !supportsInteractionToggle || forceInteractive || !data.metadata?.content ? true : Boolean(data.metadata?.interactive);
     const isBatchChild = data.type === CanvasNodeType.Image && Boolean(data.metadata?.batchRootId);
-    // 透明背景节点(如 SVG):卡片背景/边框透明,直接融入画布;选中/关联态仍显示描边以便定位
-    const transparentBg = Boolean(definition?.transparentBackground);
     const isActive = isConnectionTarget || isSelected || isFocusRelated;
     const imageBorderColor = isActive ? selectionBlue : isRelated && !isBatchChild ? theme.node.muted : "transparent";
     const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -308,52 +302,55 @@ export const CanvasNode = React.memo(function CanvasNode({
                 setHovered(false);
                 onHoverEnd(data.id);
             }}
-            onMouseDownCapture={(event) => onSelectCapture?.(event, data.id)}
             onContextMenu={(event) => onContextMenu(event, data.id)}
         >
-            {(isSelected || hovered || isEditingTitle) && (
-                <div className="absolute left-3 top-[-28px] z-[65] max-w-[calc(100%-24px)]" onMouseDown={(event) => event.stopPropagation()} onPointerDown={(event) => event.stopPropagation()}>
-                    {isEditingTitle ? (
-                        <input
-                            ref={titleInputRef}
-                            value={titleDraft}
-                            maxLength={64}
-                            className="h-6 max-w-full border-0 border-b border-dashed bg-transparent px-0 text-left text-xs font-medium outline-none"
-                            style={{ borderColor: theme.node.muted, color: theme.node.text }}
-                            onChange={(event) => setTitleDraft(event.target.value)}
-                            onBlur={finishTitleEditing}
-                            onKeyDown={(event) => {
-                                if (event.key === "Enter") finishTitleEditing();
-                                if (event.key === "Escape") {
-                                    setTitleDraft(data.title || "");
-                                    setIsEditingTitle(false);
-                                }
-                            }}
-                        />
-                    ) : (
-                        <button
-                            type="button"
-                            className="block max-w-full truncate border-b border-dashed border-transparent px-0 py-0.5 text-left text-xs font-medium opacity-75 transition hover:border-current hover:opacity-100"
-                            style={{ color: theme.node.text }}
-                            title="双击修改节点名称"
-                            onDoubleClick={(event) => {
-                                event.stopPropagation();
-                                setIsEditingTitle(true);
-                            }}
-                        >
-                            {data.title || "未命名节点"}
-                        </button>
-                    )}
-                </div>
-            )}
+            <div className="absolute left-3 top-[-28px] z-[65] max-w-[calc(100%-24px)]" onMouseDown={(event) => event.stopPropagation()} onPointerDown={(event) => event.stopPropagation()}>
+                {isEditingTitle ? (
+                    <input
+                        ref={titleInputRef}
+                        value={titleDraft}
+                        maxLength={64}
+                        className="h-6 max-w-full border-0 border-b border-dashed bg-transparent px-0 text-left text-xs font-medium outline-none"
+                        style={{ borderColor: theme.node.muted, color: theme.node.text }}
+                        onChange={(event) => setTitleDraft(event.target.value)}
+                        onBlur={finishTitleEditing}
+                        onKeyDown={(event) => {
+                            if (event.key === "Enter") finishTitleEditing();
+                            if (event.key === "Escape") {
+                                setTitleDraft(data.title || "");
+                                setIsEditingTitle(false);
+                            }
+                        }}
+                    />
+                ) : (
+                    <button
+                        type="button"
+                        className="block max-w-full truncate border-b border-dashed border-transparent px-0 py-0.5 text-left text-xs font-medium opacity-75 transition hover:border-current hover:opacity-100"
+                        style={{ color: theme.node.text }}
+                        title="双击修改节点名称"
+                        onDoubleClick={(event) => {
+                            event.stopPropagation();
+                            setIsEditingTitle(true);
+                        }}
+                    >
+                        {data.title || "未命名节点"}
+                    </button>
+                )}
+            </div>
 
             <div
                 className="relative h-full w-full overflow-visible rounded-3xl border-2"
                 style={{
-                    background: isGroup ? `${theme.toolbar.panel}66` : hasImageContent || hasVideoContent || transparentBg ? "transparent" : theme.node.fill,
-                    borderColor: isGroup ? (isGroupDropTarget || isActive ? selectionBlue : theme.node.stroke) : hasImageContent ? imageBorderColor : isActive ? selectionBlue : isRelated ? theme.node.muted : transparentBg ? "transparent" : theme.node.stroke,
+                    background: isGroup ? `${theme.toolbar.panel}66` : hasImageContent || hasVideoContent ? "transparent" : theme.node.fill,
+                    borderColor: isGroup ? (isGroupDropTarget || isActive ? selectionBlue : theme.node.stroke) : hasImageContent ? imageBorderColor : isActive ? selectionBlue : isRelated ? theme.node.muted : theme.node.stroke,
                     borderStyle: isGroup ? "dashed" : "solid",
-                    boxShadow: isGroupDropTarget ? `0 0 0 2px ${selectionBlue}66, inset 0 0 0 999px ${selectionBlue}10` : isActive ? `0 0 0 1px ${selectionBlue}55` : isRelated && !isBatchChild ? `0 0 0 1px ${theme.node.muted}55, 0 18px 48px rgba(0,0,0,.14)` : undefined,
+                    boxShadow: isGroupDropTarget
+                        ? `0 0 0 2px ${selectionBlue}66, inset 0 0 0 999px ${selectionBlue}10`
+                        : isActive
+                          ? `0 0 0 1px ${selectionBlue}55`
+                          : isRelated && !isBatchChild
+                            ? `0 0 0 1px ${theme.node.muted}55, 0 18px 48px rgba(0,0,0,.14)`
+                            : undefined,
                 }}
                 onMouseDown={(event) => onMouseDown(event, data.id)}
                 onDoubleClick={(event) => {
@@ -380,8 +377,7 @@ export const CanvasNode = React.memo(function CanvasNode({
                     className={`relative flex h-full w-full items-center justify-center rounded-[inherit] ${isBatchRoot ? "overflow-visible" : "overflow-hidden"}`}
                     style={
                         {
-                            background: isGroup ? "transparent" : hasImageContent || hasVideoContent || transparentBg ? "transparent" : theme.node.fill,
-                            pointerEvents: contentInteractive ? undefined : "none",
+                            background: isGroup ? "transparent" : hasImageContent || hasVideoContent ? "transparent" : theme.node.fill,
                             "--batch-from-x": `${batchMotion?.x || 0}px`,
                             "--batch-from-y": `${batchMotion?.y || 0}px`,
                             "--batch-from-rotate": `${6 + (batchMotion?.index || 0) * 4}deg`,
@@ -414,8 +410,12 @@ export const CanvasNode = React.memo(function CanvasNode({
                 </div>
 
                 {showImageInfo && hasImageContent ? <ImageInfoBar node={data} /> : null}
+                {resourceLabel ? <ResourceLabelBadge reference={resourceLabel} /> : null}
+                {workflowKindOf(data) ? <WorkflowStatusBadge node={data} /> : null}
 
-                {!isGroup && !hasImageContent && !hasVideoContent && !hasAudioContent ? <div className="pointer-events-none absolute inset-x-0 bottom-0 h-12" style={{ background: `linear-gradient(to top, ${theme.canvas.background}66, transparent)` }} /> : null}
+                {!isGroup && !hasImageContent && !hasVideoContent && !hasAudioContent ? (
+                    <div className="pointer-events-none absolute inset-x-0 bottom-0 h-12" style={{ background: `linear-gradient(to top, ${theme.canvas.background}66, transparent)` }} />
+                ) : null}
 
                 <ResizeHandle corner="top-left" onMouseDown={handleResizeMouseDown} />
                 <ResizeHandle corner="top-right" onMouseDown={handleResizeMouseDown} />
@@ -424,9 +424,11 @@ export const CanvasNode = React.memo(function CanvasNode({
             </div>
 
             {!isGroup ? <ConnectionHandleDot side="left" visible={hovered || isSelected || isConnecting} onMouseDown={(event) => onConnectStart(event, data.id, "target")} /> : null}
-            {!isGroup ? <ConnectionHandleDot side="right" visible={(definition?.hasSourceHandle ?? true) && data.type !== CanvasNodeType.Config && (hovered || isSelected || isConnecting)} onMouseDown={(event) => onConnectStart(event, data.id, "source")} /> : null}
+            {!isGroup ? (
+                <ConnectionHandleDot side="right" visible={(definition?.hasSourceHandle ?? true) && data.type !== CanvasNodeType.Config && (hovered || isSelected || isConnecting)} onMouseDown={(event) => onConnectStart(event, data.id, "source")} />
+            ) : null}
 
-            {showPanel && !isGroup && renderPanel ? <div className="absolute left-1/2 top-full z-[70] w-[600px] -translate-x-1/2 pt-4">{renderPanel(data)}</div> : null}
+            {showPanel && !isGroup && renderPanel ? <div className="absolute left-1/2 top-full z-[70] w-[500px] -translate-x-1/2 pt-4">{renderPanel(data)}</div> : null}
         </div>
     );
 });
@@ -517,26 +519,29 @@ function MissingPluginContent({ theme, type }: Pick<NodeContentRendererProps, "t
 
 function TextContent({ node, theme, isEditingContent, textareaRef, mentionReferences, onContentChange, onStopEditing, onGenerateImage }: NodeContentRendererProps) {
     const fontSize = node.metadata?.fontSize || 14;
+    const isWorkflowNode = Boolean(workflowKindOf(node));
     const textStyle = { fontSize: `${fontSize}px`, lineHeight: `${Math.round(fontSize * 1.65)}px`, color: theme.node.text, boxSizing: "border-box" } as React.CSSProperties;
 
     return (
         <div className="flex h-full w-full flex-col overflow-hidden pt-8">
-            <button
-                type="button"
-                className="absolute right-3 top-3 z-20 inline-flex h-8 items-center gap-1 rounded-full border px-2.5 text-xs font-medium opacity-85 backdrop-blur-md transition hover:scale-[1.02] hover:opacity-100"
-                style={{ background: `${theme.toolbar.panel}dd`, borderColor: theme.node.stroke, color: theme.node.text }}
-                onClick={(event) => {
-                    event.stopPropagation();
-                    onGenerateImage?.(node);
-                }}
-                onMouseDown={(event) => event.stopPropagation()}
-                onPointerDown={(event) => event.stopPropagation()}
-                title="用文本生图"
-                aria-label="用文本生图"
-            >
-                <ImageIcon className="size-3.5" />
-                生图
-            </button>
+            {!isWorkflowNode ? (
+                <button
+                    type="button"
+                    className="absolute right-3 top-3 z-20 inline-flex h-8 items-center gap-1 rounded-full border px-2.5 text-xs font-medium opacity-85 backdrop-blur-md transition hover:scale-[1.02] hover:opacity-100"
+                    style={{ background: `${theme.toolbar.panel}dd`, borderColor: theme.node.stroke, color: theme.node.text }}
+                    onClick={(event) => {
+                        event.stopPropagation();
+                        onGenerateImage?.(node);
+                    }}
+                    onMouseDown={(event) => event.stopPropagation()}
+                    onPointerDown={(event) => event.stopPropagation()}
+                    title="用文本生图"
+                    aria-label="用文本生图"
+                >
+                    <ImageIcon className="size-3.5" />
+                    生图
+                </button>
+            ) : null}
             {isEditingContent ? (
                 <CanvasResourceMentionTextarea
                     ref={textareaRef}
@@ -555,16 +560,83 @@ function TextContent({ node, theme, isEditingContent, textareaRef, mentionRefere
                     onWheel={(event) => event.stopPropagation()}
                 />
             ) : (
-                <div
-                    className="thin-scrollbar block h-full w-full overflow-y-auto whitespace-pre-wrap break-words bg-transparent pl-4 pr-14 pt-0 pb-4 font-mono"
-                    style={textStyle}
-                    onWheel={(event) => event.stopPropagation()}
-                >
+                <div className="thin-scrollbar block h-full w-full overflow-y-auto whitespace-pre-wrap break-words bg-transparent pl-4 pr-14 pt-0 pb-4 font-mono" style={textStyle} onWheel={(event) => event.stopPropagation()}>
                     {node.metadata?.content || <span style={{ color: theme.node.placeholder }}>双击编辑文字</span>}
                 </div>
             )}
         </div>
     );
+}
+
+function ResourceLabelBadge({ reference }: { reference: CanvasResourceReference }) {
+    return <span className={`pointer-events-none absolute right-2 top-2 z-30 rounded-md px-1.5 py-0.5 text-[10px] font-medium ${reference.active ? "bg-[#2f80ff] text-white shadow-sm" : "bg-black/35 text-white/75"}`}>{reference.label}</span>;
+}
+
+function WorkflowStatusBadge({ node }: { node: CanvasNodeData }) {
+    const theme = canvasThemes[useThemeStore((state) => state.theme)];
+    const kind = workflowKindOf(node);
+    const review = node.metadata?.storyboardImageReviewStatus || node.metadata?.testFrameReviewStatus;
+    const generationPhase = node.metadata?.storyboardGenerationPhase;
+    const generationActiveAt = generationPhase === "queued" ? node.metadata?.storyboardGenerationQueuedAt : node.metadata?.storyboardGenerationStartedAt || node.metadata?.storyboardGenerationQueuedAt;
+    const [now, setNow] = useState(Date.now());
+    useEffect(() => {
+        if (!generationPhase || !generationActiveAt) return;
+        setNow(Date.now());
+        const timer = window.setInterval(() => setNow(Date.now()), 1000);
+        return () => window.clearInterval(timer);
+    }, [generationActiveAt, generationPhase]);
+
+    const workflowLabel =
+        kind === "reference-analysis"
+            ? "结构依据"
+            : kind === "product-brief"
+              ? `${node.metadata?.productReferenceImages?.length || 0} 张产品图`
+              : kind === "hook-options"
+                ? node.metadata?.selectedHookId
+                    ? `已选 ${node.metadata.selectedHookId}`
+                    : `${node.metadata?.hookOptions?.length || 0} 个钩子`
+                : kind === "sales-script"
+                  ? "待拆分镜"
+                  : kind === "storyboard"
+                    ? `${node.metadata?.storyboardShots?.length || 0} 个镜头`
+                    : kind === "character-reference"
+                      ? review === "approved"
+                          ? "角色基准 · 已通过"
+                          : "角色基准"
+                      : kind === "storyboard-frame"
+                        ? review === "approved"
+                            ? `${node.metadata?.storyboardShotId || "故事板"} · 已通过`
+                            : `${node.metadata?.storyboardShotId || "故事板"} · 待审核`
+                        : review === "approved"
+                          ? "已通过"
+                          : review === "kept"
+                            ? "已保留"
+                            : "待审核";
+    const phaseLabel =
+        generationPhase === "queued"
+            ? "排队中"
+            : generationPhase === "generating"
+              ? `生图中${(node.metadata?.storyboardGenerationAttempt || 1) > 1 ? ` · 第 ${node.metadata?.storyboardGenerationAttempt} 次` : ""}`
+              : generationPhase === "saving"
+                ? "保存中"
+                : generationPhase === "retrying"
+                  ? `${Math.round((node.metadata?.storyboardGenerationRetryDelayMs || 0) / 1000)} 秒后重试`
+                  : "";
+    const elapsed = generationActiveAt ? formatStoryboardElapsed(now - generationActiveAt) : "";
+    const label = phaseLabel ? `${phaseLabel}${elapsed ? ` · ${elapsed}` : ""}` : workflowLabel;
+    const color = generationPhase === "retrying" ? "#d97706" : generationPhase ? "#2f80ff" : review === "approved" ? "#16a34a" : review === "kept" ? "#d97706" : "#2f80ff";
+
+    return (
+        <span className="pointer-events-none absolute left-3 top-3 z-40 rounded-md border px-2 py-1 text-[11px] font-semibold leading-none backdrop-blur-md" style={{ background: `${theme.toolbar.panel}e8`, borderColor: `${color}66`, color }}>
+            {label}
+        </span>
+    );
+}
+
+function formatStoryboardElapsed(durationMs: number) {
+    const seconds = Math.max(0, Math.floor(durationMs / 1000));
+    const minutes = Math.floor(seconds / 60);
+    return minutes ? `${minutes}:${String(seconds % 60).padStart(2, "0")}` : `${seconds}s`;
 }
 
 function ImageNodeContent(props: NodeContentRendererProps) {

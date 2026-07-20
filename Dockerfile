@@ -2,6 +2,8 @@
 FROM oven/bun:1.3.13 AS web-build
 
 WORKDIR /app/web
+ARG BUILD_SHA=dev
+ENV BUILD_SHA=$BUILD_SHA
 COPY web/package.json web/bun.lock ./
 RUN --mount=type=cache,target=/root/.bun/install/cache bun install --cache-dir=/root/.bun/install/cache
 COPY VERSION /app/VERSION

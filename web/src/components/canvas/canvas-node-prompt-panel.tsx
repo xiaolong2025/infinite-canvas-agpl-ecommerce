@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { ArrowUp, LoaderCircle, Square } from "lucide-react";
+import { ArrowUp, Clapperboard, LoaderCircle, ScanSearch, Square } from "lucide-react";
 import { Button } from "antd";
 
 import { ModelPicker } from "@/components/model-picker";
@@ -22,21 +22,24 @@ type CanvasNodePromptPanelProps = {
     onPromptChange: (nodeId: string, prompt: string) => void;
     onConfigChange: (nodeId: string, patch: Partial<CanvasNodeData["metadata"]>) => void;
     onGenerate: (nodeId: string, mode: CanvasNodeGenerationMode, prompt: string) => void;
+    onAnalyzeVideo: (nodeId: string, instruction: string) => void;
     onStop: (nodeId: string) => void;
     mentionReferences?: CanvasResourceReference[];
     onImageSettingsOpenChange?: (open: boolean) => void;
     modeOverride?: CanvasNodeGenerationMode; // 插件节点用 useBuiltinPanel.mode 指定生成类型
 };
 
-export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfigChange, onGenerate, onStop, mentionReferences = [], onImageSettingsOpenChange, modeOverride }: CanvasNodePromptPanelProps) {
+export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfigChange, onGenerate, onAnalyzeVideo, onStop, mentionReferences = [], onImageSettingsOpenChange, modeOverride }: CanvasNodePromptPanelProps) {
     const globalConfig = useEffectiveConfig();
     const openConfigDialog = useConfigStore((state) => state.openConfigDialog);
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const mode = modeOverride ?? defaultMode(node.type);
-    const config = buildNodeConfig(globalConfig, node, mode);
     const hasTextContent = node.type === CanvasNodeType.Text && Boolean(node.metadata?.content?.trim());
     const hasImageContent = node.type === CanvasNodeType.Image && Boolean(node.metadata?.content);
-    const isEditingExistingContent = hasTextContent || hasImageContent;
+    const hasVideoContent = node.type === CanvasNodeType.Video && Boolean(node.metadata?.content);
+    const effectiveMode = hasVideoContent ? "text" : mode;
+    const config = buildNodeConfig(globalConfig, node, effectiveMode, hasVideoContent);
+    const isEditingExistingContent = hasTextContent || hasImageContent || hasVideoContent;
     const [prompt, setPrompt] = useState(isEditingExistingContent ? "" : node.metadata?.prompt || "");
 
     // 仅在切换到其它节点时重置输入框;同一节点生成完成后(内容写回自身导致 isEditingExistingContent 变化)保留用户输入
@@ -52,8 +55,10 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
 
     const submit = () => {
         const text = prompt.trim();
-        if (!text || isRunning) return;
-        onGenerate(node.id, mode, text);
+        if (isRunning || (!hasVideoContent && !text)) return;
+        if (hasVideoContent) onAnalyzeVideo(node.id, text);
+        else onGenerate(node.id, effectiveMode, text);
+        setPrompt("");
     };
 
     return (
@@ -64,6 +69,16 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
             onPointerDown={(event) => event.stopPropagation()}
             onWheel={(event) => event.stopPropagation()}
         >
+            {hasVideoContent ? (
+                <div
+                    className="mb-2 flex min-w-0 items-center gap-2 rounded-xl border px-3 py-2 text-xs"
+                    style={{ background: theme.toolbar.activeBg, borderColor: theme.toolbar.border, color: theme.node.text }}
+                >
+                    <Clapperboard className="size-4 shrink-0" style={{ color: theme.node.activeStroke }} />
+                    <span className="min-w-0 flex-1 truncate">抽取关键帧，用文本模型生成拆解方案</span>
+                    <span className="shrink-0 opacity-60">不调用视频模型</span>
+                </div>
+            ) : null}
             <CanvasPromptChipInput
                 value={prompt}
                 references={mentionReferences}
@@ -71,13 +86,13 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
                 onSubmit={submit}
                 className="thin-scrollbar h-40 w-full cursor-text resize-none rounded-xl px-3 py-2 text-sm leading-5 outline-none"
                 style={{ background: "transparent", color: theme.node.text }}
-                placeholder={promptPlaceholder(mode, hasImageContent, hasTextContent)}
+                placeholder={promptPlaceholder(effectiveMode, hasImageContent, hasTextContent, hasVideoContent)}
             />
 
             <div className="mt-2 flex min-w-0 items-center justify-between gap-2">
                 <div className="flex min-w-0 items-center gap-2">
-                    <CanvasPromptLibrary onSelect={updatePrompt} />
-                    {mode === "image" ? (
+                    {!hasVideoContent ? <CanvasPromptLibrary onSelect={updatePrompt} /> : null}
+                    {effectiveMode === "image" ? (
                         <>
                             <ModelPicker config={config} value={config.model} onChange={(model) => onConfigChange(node.id, { model })} capability="image" onMissingConfig={() => openConfigDialog(true)} className="max-w-[190px]" />
                             <CanvasImageSettingsPopover
@@ -89,27 +104,27 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
                                 onOpenChange={onImageSettingsOpenChange}
                             />
                         </>
-                    ) : mode === "video" ? (
+                    ) : effectiveMode === "video" ? (
                         <>
                             <ModelPicker config={config} value={config.model} onChange={(model) => onConfigChange(node.id, { model })} capability="video" onMissingConfig={() => openConfigDialog(true)} className="max-w-[190px]" />
                             <CanvasVideoSettingsPopover config={config} buttonClassName="!h-10 !max-w-[170px] !justify-start !rounded-full !px-3" onConfigChange={(key, value) => onConfigChange(node.id, videoConfigPatch(key, value))} />
                         </>
-                    ) : mode === "audio" ? (
+                    ) : effectiveMode === "audio" ? (
                         <>
                             <ModelPicker config={config} value={config.model} onChange={(model) => onConfigChange(node.id, { model })} capability="audio" onMissingConfig={() => openConfigDialog(true)} className="max-w-[190px]" />
                             <CanvasAudioSettingsPopover config={config} buttonClassName="!h-10 !max-w-[170px] !justify-start !rounded-full !px-3" onConfigChange={(key, value) => onConfigChange(node.id, audioConfigPatch(key, value))} />
                         </>
                     ) : (
-                        <ModelPicker config={config} value={config.model} onChange={(model) => onConfigChange(node.id, { model })} capability="text" onMissingConfig={() => openConfigDialog(true)} className="max-w-[190px]" />
+                        <ModelPicker config={config} value={config.model} onChange={(model) => onConfigChange(node.id, hasVideoContent ? { analysisModel: model } : { model })} capability="text" onMissingConfig={() => openConfigDialog(true)} className="max-w-[190px]" />
                     )}
                 </div>
                 <Button
                     type="primary"
                     className="!h-10 !min-w-16 shrink-0 !rounded-full !px-3"
                     danger={isRunning}
-                    disabled={!isRunning && !prompt.trim()}
+                    disabled={!isRunning && !hasVideoContent && !prompt.trim()}
                     onClick={() => (isRunning ? onStop(node.id) : submit())}
-                    aria-label={isRunning ? "停止生成" : "生成"}
+                    aria-label={isRunning ? (hasVideoContent ? "停止拆解" : "停止生成") : hasVideoContent ? "开始拆解" : "生成"}
                 >
                     <span className="flex items-center gap-1.5">
                         {isRunning ? (
@@ -119,7 +134,10 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
                                 <span className="text-xs font-medium">停止</span>
                             </>
                         ) : (
-                            <ArrowUp className="size-4" />
+                            <>
+                                {hasVideoContent ? <ScanSearch className="size-4" /> : <ArrowUp className="size-4" />}
+                                {hasVideoContent ? <span className="text-xs font-medium">开始拆解</span> : null}
+                            </>
                         )}
                     </span>
                 </Button>
@@ -132,10 +150,10 @@ function defaultMode(type: CanvasNodeData["type"]): CanvasNodeGenerationMode {
     return type === CanvasNodeType.Text ? "text" : type === CanvasNodeType.Video ? "video" : type === CanvasNodeType.Audio ? "audio" : "image";
 }
 
-function buildNodeConfig(globalConfig: AiConfig, node: CanvasNodeData, mode: CanvasNodeGenerationMode): AiConfig {
+function buildNodeConfig(globalConfig: AiConfig, node: CanvasNodeData, mode: CanvasNodeGenerationMode, isVideoAnalysis = false): AiConfig {
     const defaultModel = mode === "image" ? globalConfig.imageModel : mode === "video" ? globalConfig.videoModel : mode === "audio" ? globalConfig.audioModel : globalConfig.textModel;
     const fallbackModel = mode === "image" ? defaultConfig.imageModel : mode === "video" ? defaultConfig.videoModel : mode === "audio" ? defaultConfig.audioModel : defaultConfig.textModel;
-    const currentModel = node.metadata?.model;
+    const currentModel = isVideoAnalysis ? node.metadata?.analysisModel : node.metadata?.model;
     const model = currentModel && modelMatchesCapability(globalConfig, currentModel, mode)
         ? currentModel
         : defaultModel && modelMatchesCapability(globalConfig, defaultModel, mode)
@@ -159,7 +177,8 @@ function buildNodeConfig(globalConfig: AiConfig, node: CanvasNodeData, mode: Can
     };
 }
 
-function promptPlaceholder(mode: CanvasNodeGenerationMode, hasImageContent: boolean, hasTextContent: boolean) {
+function promptPlaceholder(mode: CanvasNodeGenerationMode, hasImageContent: boolean, hasTextContent: boolean, hasVideoContent: boolean) {
+    if (hasVideoContent) return "可补充产品、市场和复刻要求，例如：东南亚女装、TikTok 竖屏（可选）";
     if (mode === "video") return "描述要生成的视频内容";
     if (mode === "audio") return "描述要生成的音频内容";
     if (mode === "image") return hasImageContent ? "请输入你想要把这张图修改成什么" : "描述要生成的图片内容";

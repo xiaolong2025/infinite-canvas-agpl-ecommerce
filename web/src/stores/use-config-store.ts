@@ -10,6 +10,7 @@ export type ChannelModel = {
     name: string;
     capability: ModelCapability;
     script?: string;
+    supportsImageReferences?: boolean;
 };
 
 export type ModelChannel = {
@@ -254,7 +255,8 @@ export function normalizeChannelModels(models: Array<string | ChannelModel> | un
         seen.add(name);
         const capability = typeof item === "string" ? guessCapability(name) : item.capability || guessCapability(name);
         const script = typeof item === "string" ? undefined : item.script?.trim() || undefined;
-        result.push({ name, capability, script });
+        const supportsImageReferences = typeof item === "string" || typeof item.supportsImageReferences !== "boolean" ? undefined : item.supportsImageReferences;
+        result.push({ name, capability, script, ...(supportsImageReferences === undefined ? {} : { supportsImageReferences }) });
     }
     return result;
 }
@@ -321,12 +323,14 @@ export function resolveModelChannel(config: AiConfig, value: string) {
 
 export function resolveModelRequestConfig(config: AiConfig, value: string) {
     const channel = resolveModelChannel(config, value);
+    const matched = findChannelModel(config, value || config.model);
     return {
         ...config,
         model: modelOptionName(value || config.model),
         baseUrl: channel.baseUrl,
         apiKey: channel.apiKey,
         apiFormat: channel.apiFormat,
+        supportsImageReferences: matched?.model.supportsImageReferences,
     };
 }
 

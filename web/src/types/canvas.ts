@@ -24,11 +24,87 @@ export type CanvasNodeTypeId = CanvasNodeType | (string & {});
 export type CanvasNodeStatus = "idle" | "success" | "loading" | "error";
 export type CanvasGenerationMode = "text" | "image" | "video" | "audio";
 export type CanvasImageGenerationType = "generation" | "edit";
+export type CanvasWorkflowKind = "reference-analysis" | "product-brief" | "hook-options" | "sales-script" | "storyboard" | "character-reference" | "storyboard-frame" | "test-frame";
+export type CanvasTestFrameReviewStatus = "pending" | "kept" | "approved";
+export type CanvasStoryboardImageReviewStatus = "pending" | "approved";
+export type EcommerceHookDifficulty = "low" | "medium" | "high";
+
+export type EcommerceProductBrief = {
+    productName: string;
+    sku?: string;
+    category: string;
+    market: string;
+    platform: string;
+    audience: string;
+    language: string;
+    videoDuration: string;
+    sellingPoints: string;
+    offer?: string;
+    cta?: string;
+    prohibitedClaims?: string;
+    visualRequirements?: string;
+};
+
+export type EcommerceProductReference = {
+    id: string;
+    name: string;
+    url: string;
+    storageKey: string;
+    mimeType: string;
+};
+
+export type EcommerceHookOption = {
+    id: string;
+    title: string;
+    angle: string;
+    firstSecondVisual: string;
+    concreteIncident: string;
+    stakes: string;
+    productEntryAction: string;
+    visiblePayoff: string;
+    hookLine: string;
+    productionDifficulty: EcommerceHookDifficulty;
+    requiredAssets: string[];
+    whyItWorks: string;
+};
+
+export type EcommerceStoryboardShotRole = "hook" | "reveal" | "detail" | "cta" | "other";
+export type EcommerceStoryboardProductProminence = "none" | "secondary" | "primary";
+export type StoryboardGenerationPhase = "queued" | "generating" | "saving" | "retrying";
+
+export type EcommerceStoryboardShot = {
+    id: string;
+    role: EcommerceStoryboardShotRole;
+    timeRange: string;
+    durationSeconds: number;
+    shotPurpose: string;
+    storyBeat: string;
+    characterIdentity: string;
+    characters: string;
+    scene: string;
+    environmentEvidence: string[];
+    compositionPlan: string;
+    continuity: string;
+    productVisible: boolean;
+    productProminence: EcommerceStoryboardProductProminence;
+    wardrobeState: string;
+    requiredVisualEvidence: string[];
+    forbiddenVisuals: string[];
+    transitionAnchor: string;
+    voiceover: string;
+    onScreenText: string;
+    visual: string;
+    camera: string;
+    productFocus: string;
+    imagePrompt: string;
+};
 
 export type CanvasNodeMetadata = {
     content?: string;
     composerContent?: string;
     prompt?: string;
+    background?: string;
+    interactive?: boolean;
     status?: CanvasNodeStatus;
     errorDetails?: string;
     fontSize?: number;
@@ -37,7 +113,6 @@ export type CanvasNodeMetadata = {
     model?: string;
     size?: string;
     quality?: string;
-    background?: string;
     count?: number;
     seconds?: string;
     vquality?: string;
@@ -47,6 +122,7 @@ export type CanvasNodeMetadata = {
     audioFormat?: string;
     audioSpeed?: string;
     audioInstructions?: string;
+    analysisModel?: string;
     references?: string[];
     naturalWidth?: number;
     naturalHeight?: number;
@@ -62,7 +138,35 @@ export type CanvasNodeMetadata = {
     bytes?: number;
     durationMs?: number;
     groupId?: string;
-    interactive?: boolean; // 插件节点「交互 ⇄ 移动」开关状态(见 CanvasNodeDefinition.interactionToggle)
+    workflowKind?: CanvasWorkflowKind;
+    workflowParentId?: string;
+    referenceAnalysisNodeId?: string;
+    productBriefNodeId?: string;
+    productBrief?: EcommerceProductBrief;
+    productReferenceImages?: EcommerceProductReference[];
+    hookOptionsNodeId?: string;
+    hookOptions?: EcommerceHookOption[];
+    selectedHookId?: string;
+    hookOption?: EcommerceHookOption;
+    storyboardShots?: EcommerceStoryboardShot[];
+    storyboardNodeId?: string;
+    storyboardVersion?: number;
+    storyboardFrameIndex?: number;
+    storyboardShotId?: string;
+    storyboardShotRole?: EcommerceStoryboardShotRole;
+    storyboardProductVisible?: boolean;
+    characterReferenceNodeId?: string;
+    previousStoryboardFrameNodeId?: string;
+    storyboardImageReviewStatus?: CanvasStoryboardImageReviewStatus;
+    storyboardDisplaySizeVersion?: number;
+    storyboardGenerationPhase?: StoryboardGenerationPhase;
+    storyboardGenerationQueuedAt?: number;
+    storyboardGenerationStartedAt?: number;
+    storyboardGenerationAttempt?: number;
+    storyboardGenerationRetryDelayMs?: number;
+    storyboardGenerationElapsedMs?: number;
+    storyboardReferenceInputSupported?: boolean;
+    testFrameReviewStatus?: CanvasTestFrameReviewStatus;
 };
 
 export type CanvasNodeData = {
