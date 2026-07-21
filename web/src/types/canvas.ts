@@ -110,6 +110,8 @@ export type CanvasNodeMetadata = {
     fontSize?: number;
     generationMode?: CanvasGenerationMode;
     generationType?: CanvasImageGenerationType;
+    visionInputRequired?: boolean;
+    referenceImageRequired?: boolean;
     model?: string;
     size?: string;
     quality?: string;

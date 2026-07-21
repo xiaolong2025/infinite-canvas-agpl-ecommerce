@@ -161,6 +161,12 @@ export function modelMatchesCapability(config: AiConfig, value: string, capabili
     return modelCapabilityOf(config, value) === capability;
 }
 
+export function modelSupportsImageReferences(config: AiConfig, value: string) {
+    const matched = findChannelModel(config, value);
+    if (!matched) return config.apiFormat === "gemini";
+    return matched.channel.apiFormat === "gemini" || matched.model.supportsImageReferences === true;
+}
+
 export function selectableModelsByCapability(config: AiConfig, capability?: ModelCapability) {
     if (!capability) return config.models;
     return config.channels.flatMap((channel) => channel.models.filter((model) => model.capability === capability).map((model) => encodeChannelModel(channel.id, model.name)));

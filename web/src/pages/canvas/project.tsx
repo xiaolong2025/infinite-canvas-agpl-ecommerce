@@ -9,7 +9,7 @@ import { requestAudioGeneration, storeGeneratedAudio } from "@/services/api/audi
 import { requestVideoGeneration, storeGeneratedVideo } from "@/services/api/video";
 import { buildReferenceVideoAnalysisMessages, extractVideoFrames } from "@/services/video-analysis";
 import { DOCS_URL } from "@/constant/env";
-import { decodeChannelModel, defaultConfig, selectableModelsByCapability, type AiConfig, type ModelCapability, useConfigStore, useEffectiveConfig } from "@/stores/use-config-store";
+import { decodeChannelModel, defaultConfig, modelSupportsImageReferences, selectableModelsByCapability, type AiConfig, type ModelCapability, useConfigStore, useEffectiveConfig } from "@/stores/use-config-store";
 import { imageToDataUrl, resolveImageUrl, uploadImage, type UploadedImage } from "@/services/image-storage";
 import { resolveMediaUrl, uploadMediaFile, type UploadedFile } from "@/services/file-storage";
 import { nanoid } from "nanoid";
@@ -152,12 +152,39 @@ const NODE_STATUS_IDLE = "idle" as const;
 const NODE_STATUS_LOADING = "loading" as const;
 const NODE_STATUS_SUCCESS = "success" as const;
 const NODE_STATUS_ERROR = "error" as const;
-const IMAGE_PROMPT_REVERSE_PRESET = `请根据参考图片反推一段适合用于 AI 生图的提示词。
+const IMAGE_PROMPT_REVERSE_PRESET = `请不要只描述图片里有什么，请从主体特征、构图方式、镜头角度、光线方向、色彩搭配、材质细节、画面风格和背景元素八个方面进行拆解。
 
-要求：
-1. 只输出提示词正文，不要解释。
-2. 覆盖主体、构图、风格、光线、色彩、材质、镜头和氛围。
-3. 尽量写成可直接用于生图模型的完整提示词。`;
+然后根据拆解结果，反推出一段可以生成相似效果的完整中文提示词，并补充画面比例、清晰度、质感要求和禁止出现的内容。
+
+硬性要求：
+1. 只依据参考图片中真实可见的内容，不得替换主体、服装、图案、姿势、场景或画面风格。
+2. 不能延续历史答案、示例答案或常见幻想题材；看不清的文字、Logo、材质和身份信息必须写“无法确认”，不得臆造。
+3. 最终提示词必须明确主体特征、服装颜色与图案、版型、姿势、构图、镜头角度、光线方向、色彩搭配、材质细节、背景元素、画面风格和氛围。
+4. 禁止把参考图改写成另一类人物、另一种服装、商品目录图、棚拍白底图或无关幻想场景。
+5. 如果无法读取参考图片，只输出“无法读取参考图片”。
+
+请严格使用以下格式：
+【八维拆解】
+主体特征：
+构图方式：
+镜头角度：
+光线方向：
+色彩搭配：
+材质细节：
+画面风格：
+背景元素：
+
+【完整中文生图提示词】
+（这里输出一段可以直接交给生图模型的完整中文提示词）
+
+【画面比例】
+（根据参考图判断，例如 1:1、4:5、9:16 或 16:9；无法判断时写“无法确认”）
+
+【清晰度与质感】
+（只写参考图能支持的清晰度、细节和质感要求，不得虚构材质功能）
+
+【禁止出现】
+（列出会导致生成结果偏离参考图的主体、服装、图案、背景、构图和风格）`;
 
 function createCanvasNode(type: CanvasNodeTypeId, position: Position, metadata?: CanvasNodeMetadata): CanvasNodeData {
     const spec = getNodeSpec(type);
@@ -1927,6 +1954,7 @@ function InfiniteCanvasPage() {
                     { x: textNode.position.x + textNode.width + gap + configSpec.width / 2, y: centerY },
                     {
                         generationMode: "text",
+                        visionInputRequired: true,
                         model: effectiveConfig.textModel || effectiveConfig.model || defaultConfig.textModel,
                         count: 1,
                         composerContent: `参考图片：@[node:${node.id}]\n任务说明：@[node:${textNode.id}]`,
@@ -2283,6 +2311,8 @@ function InfiniteCanvasPage() {
     const handleGenerateNode = useCallback(
         async (nodeId: string, mode: CanvasNodeGenerationMode, prompt: string) => {
             const sourceNode = nodesRef.current.find((node) => node.id === nodeId);
+            const requiresVisionInput = sourceNode?.metadata?.visionInputRequired === true || sourceNode?.title === "反推提示词配置";
+            const requiresReferenceImageForGeneration = mode === "image" && sourceNode?.metadata?.referenceImageRequired === true;
             const generationConfig = buildGenerationConfig(effectiveConfig, sourceNode, mode);
             if (!isAiConfigReady(generationConfig, generationConfig.model)) {
                 openConfigDialog(true);
@@ -2297,6 +2327,30 @@ function InfiniteCanvasPage() {
                 buildNodeGenerationContext(nodeId, nodesRef.current, connectionsRef.current, editingTextNode ? `请根据要求修改以下文本。\n\n原文：\n${sourceTextContent}\n\n修改要求：\n${prompt}` : prompt),
             );
             const effectivePrompt = generationContext.prompt.trim();
+            if (requiresVisionInput && !generationContext.referenceImages.length) {
+                message.error("这项任务必须连接一张可读取的参考图片");
+                finishGenerationRequest(nodeId, runController);
+                setRunningNodeId(null);
+                return;
+            }
+            if (requiresVisionInput && !modelSupportsImageReferences(effectiveConfig, generationConfig.model)) {
+                message.error("当前文本模型未开启图片理解，请管理员为该模型启用 image-ref");
+                finishGenerationRequest(nodeId, runController);
+                setRunningNodeId(null);
+                return;
+            }
+            if (requiresReferenceImageForGeneration && !generationContext.referenceImages.length) {
+                message.error("反推生图必须保留原图参考，请先连接原始图片");
+                finishGenerationRequest(nodeId, runController);
+                setRunningNodeId(null);
+                return;
+            }
+            if (requiresReferenceImageForGeneration && !supportsImageReferenceInput(generationConfig)) {
+                message.error("当前生图模型未开启 image-ref，已阻止纯文字生图；请管理员启用参考图能力后重试");
+                finishGenerationRequest(nodeId, runController);
+                setRunningNodeId(null);
+                return;
+            }
             if (runController.signal.aborted) {
                 finishGenerationRequest(nodeId, runController);
                 setRunningNodeId(null);
@@ -2619,7 +2673,13 @@ function InfiniteCanvasPage() {
                             },
                             { signal: controller.signal },
                         )
-                            .then((answer) => ({ nodeId: targetNodeId, content: answer || localStreamed }))
+                            .then((answer) => {
+                                const content = answer || localStreamed;
+                                if (requiresVisionInput && /无法读取参考图片|cannot (?:read|see|access) (?:the )?(?:reference )?image/i.test(content)) {
+                                    throw new Error("文本模型没有读取到参考图片，请检查模型的 image-ref 配置后重试");
+                                }
+                                return { nodeId: targetNodeId, content };
+                            })
                             .finally(() => finishGenerationRequest(targetNodeId, controller));
                     }),
                 );
@@ -2792,6 +2852,7 @@ function InfiniteCanvasPage() {
                         workflowParentId: productNode.id,
                         referenceAnalysisNodeId: sourceNode.id,
                         productBriefNodeId: productNode.id,
+                        visionInputRequired: true,
                     },
                 };
                 hookNodeId = hookNode.id;
@@ -2808,6 +2869,8 @@ function InfiniteCanvasPage() {
                 const controller = startGenerationRequest(hookNode.id, sourceNode.id, sourceNode.id);
                 try {
                     const references = await resolveProductReferenceImages(productNode);
+                    if (!references.length) throw new Error("生成三案需要至少一张可读取的产品参考图");
+                    if (!modelSupportsImageReferences(effectiveConfig, textConfig.model)) throw new Error("当前文本模型未开启图片理解，请管理员为该模型启用 image-ref");
                     const response = await requestImageQuestion(textConfig, buildHookOptionsMessages(analysis, productContent, references), () => undefined, { signal: controller.signal });
                     const options = parseHookOptionsResponse(response);
                     setNodes((prev) =>
@@ -2869,6 +2932,8 @@ function InfiniteCanvasPage() {
             const controller = startGenerationRequest(hookNode.id, hookNode.id, hookNode.id);
             try {
                 const references = await resolveProductReferenceImages(productNode);
+                if (!references.length) throw new Error("重新生成三案需要至少一张可读取的产品参考图");
+                if (!modelSupportsImageReferences(effectiveConfig, textConfig.model)) throw new Error("当前文本模型未开启图片理解，请管理员为该模型启用 image-ref");
                 const response = await requestImageQuestion(textConfig, buildHookOptionsMessages(analysis, productContent, references), () => undefined, { signal: controller.signal });
                 const options = parseHookOptionsResponse(response);
                 setNodes((prev) =>
@@ -3949,13 +4014,21 @@ function InfiniteCanvasPage() {
 
     const generateImageFromTextNode = useCallback(
         (node: CanvasNodeData) => {
-            const prompt = (node.metadata?.content || node.metadata?.prompt || "").trim();
+            const rawPrompt = (node.metadata?.content || node.metadata?.prompt || "").trim();
+            const prompt = extractImageGenerationPrompt(rawPrompt);
             if (!prompt) {
                 message.warning("文本节点为空，无法生图");
                 return;
             }
             const sourceNode = nodesRef.current.find((item) => item.id === node.id);
             if (!sourceNode) return;
+            const reversePromptSource = connectionsRef.current
+                .filter((connection) => connection.toNodeId === sourceNode.id)
+                .map((connection) => nodesRef.current.find((item) => item.id === connection.fromNodeId))
+                .find((item): item is CanvasNodeData => Boolean(item && item.title === "反推提示词配置"));
+            const inheritedInputs = buildNodeGenerationInputs(reversePromptSource?.id || sourceNode.id, nodesRef.current, connectionsRef.current);
+            const inheritedReferences = inheritedInputs.map((input) => input.image).filter((image): image is ReferenceImage => Boolean(image));
+            const hasReversePromptSource = Boolean(reversePromptSource);
             const nodeSize = getNodeSpec(CanvasNodeType.Config);
             const configNode = createCanvasNode(
                 CanvasNodeType.Config,
@@ -3965,14 +4038,22 @@ function InfiniteCanvasPage() {
                 },
                 {
                     prompt: "",
+                    composerContent:
+                        hasReversePromptSource && inheritedReferences.length
+                            ? `${prompt}\n\n${inheritedReferences.map((reference, index) => `参考图片${index + 1}：@[node:${reference.id}]`).join("\n")}`
+                            : `@[node:${sourceNode.id}]`,
+                    referenceImageRequired: hasReversePromptSource,
                     model: effectiveConfig.imageModel || effectiveConfig.model,
                     size: effectiveConfig.size,
                     count: getGenerationCount(effectiveConfig.canvasImageCount || effectiveConfig.count),
                 },
             );
-            const connection = { id: nanoid(), fromNodeId: sourceNode.id, toNodeId: configNode.id };
-            const nextNodes = nodesRef.current.map((item) => (item.id === sourceNode.id ? { ...item, metadata: { ...item.metadata, content: prompt, prompt, status: NODE_STATUS_SUCCESS } } : item)).concat(configNode);
-            const nextConnections = [...connectionsRef.current, connection];
+            const connectionsToConfig = [
+                { id: nanoid(), fromNodeId: sourceNode.id, toNodeId: configNode.id },
+                ...(hasReversePromptSource ? inheritedReferences.map((reference) => ({ id: nanoid(), fromNodeId: reference.id, toNodeId: configNode.id })) : []),
+            ];
+            const nextNodes = nodesRef.current.map((item) => (item.id === sourceNode.id ? { ...item, metadata: { ...item.metadata, content: rawPrompt, prompt, status: NODE_STATUS_SUCCESS } } : item)).concat(configNode);
+            const nextConnections = [...connectionsRef.current, ...connectionsToConfig];
             nodesRef.current = nextNodes;
             connectionsRef.current = nextConnections;
             setNodes(nextNodes);
@@ -4680,6 +4761,30 @@ function Shortcut({ keys, value }: { keys: string[]; value: string }) {
 
 function imageExtension(dataUrl: string) {
     return dataUrl.match(/^data:image[/]([^;]+)/)?.[1] || dataUrl.match(/image[/]([^;]+)/)?.[1] || "png";
+}
+
+function extractImageGenerationPrompt(value: string) {
+    const fullPrompt = readReversePromptSection(value, "完整中文生图提示词");
+    if (!fullPrompt) return value;
+
+    const ratio = readReversePromptSection(value, "画面比例");
+    const quality = readReversePromptSection(value, "清晰度与质感");
+    const forbidden = readReversePromptSection(value, "禁止出现");
+    return [
+        fullPrompt,
+        ratio ? `画面比例：${ratio}` : "",
+        quality ? `清晰度与质感：${quality}` : "",
+        forbidden ? `禁止出现：${forbidden}` : "",
+    ]
+        .filter(Boolean)
+        .join("\n\n")
+        .trim();
+}
+
+function readReversePromptSection(value: string, label: string) {
+    const labels = "八维拆解|完整中文生图提示词|画面比例|清晰度与质感|禁止出现";
+    const match = value.match(new RegExp(`【${label}】\\s*([\\s\\S]*?)(?=\\n?【(?:${labels})】|$)`));
+    return match?.[1]?.trim() || "";
 }
 
 function audioExtension(mimeType?: string) {

@@ -113,6 +113,7 @@ function readAxiosError(error: unknown, fallback: string) {
 
 function statusMessage(status: number | undefined, fallback: string) {
     if (status === 401 || status === 403) return "鉴权失败，请检查 API Key、套餐权限或模型权限";
+    if (status === 413) return "参考文件或请求内容过大，超过服务器允许的上传上限";
     if (status === 429) return "请求被限流或额度不足，请稍后重试";
     return status ? `${fallback}（${status}）` : fallback;
 }

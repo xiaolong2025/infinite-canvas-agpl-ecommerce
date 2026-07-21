@@ -355,7 +355,7 @@ export default function ConfigPage() {
                     <Form.Item
                         name="modelsText"
                         label="开放模型"
-                        extra="每行一个：模型名 | 能力。能力可填 text、image、video、audio；生图模型第三列填 image-ref 可开启参考图。"
+                        extra="每行一个：模型名 | 能力。能力可填 text、image、video、audio；需要接收参考图片的文本或生图模型，第三列填 image-ref。"
                         rules={[{ required: true, message: "至少配置一个模型" }]}
                     >
                         <Input.TextArea rows={7} placeholder={"gemini-2.5-flash | text\nkedaya-image | image | image-ref"} />

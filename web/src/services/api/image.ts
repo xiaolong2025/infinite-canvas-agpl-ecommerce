@@ -6,6 +6,7 @@ import { nanoid } from "nanoid";
 import { dataUrlToFile } from "@/lib/image-utils";
 import { buildImageReferencePromptText } from "@/lib/image-reference-prompt";
 import { imageToDataUrl, resolveImageUrl } from "@/services/image-storage";
+import { optimizeAiVisionMessages } from "@/services/ai-vision-input";
 import type { ReferenceImage } from "@/types/image";
 
 export type AiTextMessage = {
@@ -254,7 +255,7 @@ function readAxiosError(error: unknown, fallback: string) {
     if (axios.isCancel(error)) return "请求已取消";
     if (axios.isAxiosError<{ error?: { message?: string } | string; msg?: string; message?: string; detail?: string; code?: number }>(error)) {
         const status = error.response?.status;
-        if (status === 401 || status === 403 || status === 429) {
+        if (status === 401 || status === 403 || status === 413 || status === 429) {
             return readStatusError(status, fallback);
         }
         const responseData = error.response?.data;
@@ -272,6 +273,7 @@ function readAxiosError(error: unknown, fallback: string) {
 
 function readStatusError(status: number | undefined, fallback: string) {
     if (status === 401 || status === 403) return "鉴权失败，请检查 API Key、套餐权限或模型权限";
+    if (status === 413) return "参考图片或请求内容过大，超过服务器允许的上传上限";
     if (status === 429) return "请求被限流或额度不足，请稍后重试";
     return status ? `${fallback}：${status}` : fallback;
 }
@@ -428,8 +430,11 @@ function validateGeminiPayload(payload: GeminiPayload) {
 }
 
 async function readFetchError(response: Response, fallback: string) {
+    if (response.status === 413) return readStatusError(response.status, fallback);
     const text = await response.text();
     if (!text) return readStatusError(response.status, fallback);
+    const contentType = response.headers.get("content-type") || "";
+    if (contentType.includes("text/html") || /^\s*<!?html/i.test(text)) return readStatusError(response.status, fallback);
     try {
         return responseErrorMessage(JSON.parse(text)) || readStatusError(response.status, fallback);
     } catch {
@@ -826,13 +831,14 @@ export async function requestEdit(config: AiConfig, prompt: string, references: 
 export async function requestImageQuestion(config: AiConfig, messages: AiTextMessage[], onDelta: (text: string) => void, options?: RequestOptions) {
     const requestConfig = resolveModelRequestConfig(config, config.model || config.textModel);
     const script = resolveModelScript(config, config.model || config.textModel);
+    const requestMessages = await optimizeAiVisionMessages(messages);
     if (script) {
         try {
             const answer = await runModelPlugin<string>({
                 capability: "text",
                 script,
                 config: requestConfig,
-                messages: withSystemMessage(requestConfig, messages),
+                messages: withSystemMessage(requestConfig, requestMessages),
                 signal: options?.signal,
                 onDelta,
             });
@@ -845,12 +851,12 @@ export async function requestImageQuestion(config: AiConfig, messages: AiTextMes
     }
     try {
         if (requestConfig.apiFormat === "gemini") {
-            const answer = (await requestGeminiStreamingResponse(requestConfig, toGeminiBody(requestConfig, messages), onDelta, options)).content || "没有返回内容";
+            const answer = (await requestGeminiStreamingResponse(requestConfig, toGeminiBody(requestConfig, requestMessages), onDelta, options)).content || "没有返回内容";
             if (answer === "没有返回内容") onDelta(answer);
             return answer;
         }
         if (usesChatCompletions(requestConfig)) {
-            const answer = (await requestChatCompletionResponse(requestConfig, withAiSystemMessage(requestConfig, messages), onDelta, options)) || "没有返回内容";
+            const answer = (await requestChatCompletionResponse(requestConfig, withAiSystemMessage(requestConfig, requestMessages), onDelta, options)) || "没有返回内容";
             if (answer === "没有返回内容") onDelta(answer);
             return answer;
         }
@@ -860,7 +866,7 @@ export async function requestImageQuestion(config: AiConfig, messages: AiTextMes
                     requestConfig,
                     {
                         model: requestConfig.model,
-                        input: toResponseInput(withSystemMessage(requestConfig, messages)),
+                        input: toResponseInput(withSystemMessage(requestConfig, requestMessages)),
                     },
                     onDelta,
                     options,
