@@ -5,18 +5,28 @@ WORKDIR /app/web
 ARG BUILD_SHA=dev
 ENV BUILD_SHA=$BUILD_SHA
 COPY web/package.json web/bun.lock ./
-RUN --mount=type=cache,target=/root/.bun/install/cache bun install --cache-dir=/root/.bun/install/cache
+RUN --mount=type=cache,target=/root/.bun/install/cache bun install --frozen-lockfile --cache-dir=/root/.bun/install/cache
 COPY VERSION /app/VERSION
 COPY CHANGELOG.md /app/CHANGELOG.md
 COPY web ./
 RUN bun run build
 
-# 运行镜像：只启动静态前端，AI 请求由浏览器前台直连用户自己的接口。
-FROM nginx:1.27-alpine
+# 运行镜像：Bun 同时托管静态前端、登录、SQLite 和受控 AI 代理。
+FROM oven/bun:1.3.13-alpine
 
-COPY --from=web-build /app/web/dist /usr/share/nginx/html
-COPY nginx.conf /etc/nginx/conf.d/default.conf
-COPY web/docker-entrypoint.sh /docker-entrypoint.d/40-runtime-config.sh
-RUN chmod +x /docker-entrypoint.d/40-runtime-config.sh
+WORKDIR /app
+ENV NODE_ENV=production
+ENV PORT=3000
+ENV STATIC_DIR=/app/web/dist
+ENV DATA_DIR=/app/data
+ENV APP_SECURE_COOKIES=true
+
+COPY --from=web-build /app/web/dist /app/web/dist
+COPY server/src /app/server/src
+
+RUN mkdir -p /app/data && chown -R bun:bun /app
+USER bun
 
 EXPOSE 3000
+
+CMD ["bun", "server/src/index.ts"]

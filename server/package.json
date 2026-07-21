@@ -1,0 +1,16 @@
+{
+    "name": "yige-canvas-server",
+    "version": "0.1.0",
+    "private": true,
+    "type": "module",
+    "scripts": {
+        "dev": "bun --watch src/index.ts",
+        "start": "bun src/index.ts",
+        "typecheck": "tsc --noEmit",
+        "test": "bun test"
+    },
+    "devDependencies": {
+        "@types/bun": "^1.3.13",
+        "typescript": "^5"
+    }
+}

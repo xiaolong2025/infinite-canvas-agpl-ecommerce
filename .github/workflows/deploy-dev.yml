@@ -37,6 +37,18 @@ jobs:
           BUILD_SHA: ${{ github.sha }}
         run: bun run typecheck
 
+      - name: Install server type dependencies
+        working-directory: server
+        run: bun install --frozen-lockfile
+
+      - name: Typecheck server
+        working-directory: server
+        run: bun run typecheck
+
+      - name: Test server
+        working-directory: server
+        run: bun test
+
       - name: Build web
         working-directory: web
         env:

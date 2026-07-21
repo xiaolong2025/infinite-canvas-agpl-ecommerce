@@ -5,17 +5,26 @@ description: 用最少步骤把无限画布跑起来
 
 # 快速开始
 
-如果你只是想先把项目跑起来，优先部署或启动 `web/` 前端。
+当前二开版本必须同时运行 `server/` 和 `web/` 构建产物，不能只部署静态前端。
 
 ## Vercel 部署
 
-在 Vercel 中导入仓库即可，根目录 `vercel.json` 会构建 `web/`。当前版本的 AI 请求由浏览器前台直连用户自己的 OpenAI 兼容地址，不需要额外配置服务端。
+当前登录、SQLite 和服务端渠道代理需要常驻 Bun 服务及持久化数据目录，不再支持只通过根目录 `vercel.json` 完成正式部署。
 
 ## 本地启动
 
 ```bash
-git clone git@github.com:basketikun/infinite-canvas.git
+git clone <你的仓库地址>
 cd infinite-canvas
+cd server
+bun install
+cp .env.example .env
+bun run dev
+```
+
+另开一个终端：
+
+```bash
 cd web
 bun install
 bun run dev
@@ -33,16 +42,21 @@ http://localhost:3000
 
 ```bash
 docker build -t infinite-canvas .
-docker run --rm -p 3000:3000 infinite-canvas
+docker run --rm -p 3000:3000 \
+  --env-file ./ops/runtime.env.example \
+  -v infinite-canvas-data:/app/data \
+  infinite-canvas
 ```
 
 ## 首次使用建议
 
-- 先打开右上角配置弹窗，填入自己的 `Base URL`、`API Key` 和模型名。
+- 不要直接使用示例环境文件上线。先生成独立的 `APP_ENCRYPTION_KEY`，并设置首次管理员账号和强密码。
+- 使用管理员账号登录后，在“管理”中配置 Base URL、API Key、允许模型和能力类型。
+- 确认管理员能够登录且数据卷已持久化后，从服务器环境文件中移除首次管理员密码。
 - 如果需要提示词仓库内容，打开 `/prompts` 会由浏览器前端直连拉取并缓存到 IndexedDB。
 - 如果需要跨设备同步画布、素材和生成记录，可在配置弹窗中填写 WebDAV。
 
 ## 说明
 
 - 当前画布项目和“我的素材”主要保存在浏览器本地，WebDAV 同步需要用户自行配置。
-- AI API Key 保存在浏览器本地，并由前端直接请求 OpenAI 兼容接口。
+- AI API Key 由服务端加密保存，普通用户无法从模型配置接口读取真实密钥。

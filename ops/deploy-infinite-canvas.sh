@@ -11,6 +11,8 @@ LOG_DIR="${CANVAS_LOG_DIR:-$ROOT_DIR/logs}"
 BACKUP_DIR="${CANVAS_NGINX_BACKUP_DIR:-$ROOT_DIR/nginx-backups}"
 PUBLIC_URL="${CANVAS_PUBLIC_URL:-https://canvas.yigeai.work/}"
 YIGEAI_HEALTH_URL="${YIGEAI_HEALTH_URL:-}"
+RUNTIME_ENV_FILE="${CANVAS_RUNTIME_ENV_FILE:-$ROOT_DIR/runtime.env}"
+PERSISTENT_DATA_DIR="${CANVAS_DATA_DIR:-$ROOT_DIR/data}"
 PORT_A="${CANVAS_PORT_A:-3100}"
 PORT_B="${CANVAS_PORT_B:-3101}"
 
@@ -185,7 +187,7 @@ start_candidate() {
     local port="$3"
     local project="$4"
     if docker compose version >/dev/null 2>&1; then
-        CANVAS_IMAGE="$image" CANVAS_CONTAINER="$container" CANVAS_PORT="$port" \
+        CANVAS_IMAGE="$image" CANVAS_CONTAINER="$container" CANVAS_PORT="$port" CANVAS_RUNTIME_ENV_FILE="$RUNTIME_ENV_FILE" CANVAS_DATA_DIR="$PERSISTENT_DATA_DIR" \
             docker compose -p "$project" -f "$COMPOSE_FILE" up -d --no-build app
         return
     fi
@@ -196,6 +198,8 @@ start_candidate() {
         --restart unless-stopped \
         --security-opt no-new-privileges:true \
         -p "127.0.0.1:${port}:3000" \
+        --env-file "$RUNTIME_ENV_FILE" \
+        -v "$PERSISTENT_DATA_DIR:/app/data" \
         -e "ANALYTICS_GA4_ID=${ANALYTICS_GA4_ID:-}" \
         -e "ANALYTICS_BAIDU_ID=${ANALYTICS_BAIDU_ID:-}" \
         "$image" >/dev/null
@@ -209,6 +213,8 @@ deploy() {
     validate_image "$image" "$sha"
     [ -f "$COMPOSE_FILE" ] || die "Missing Compose file: $COMPOSE_FILE"
     [ -f "$NGINX_TEMPLATE" ] || die "Missing Nginx template: $NGINX_TEMPLATE"
+    [ -f "$RUNTIME_ENV_FILE" ] || die "Missing runtime environment file: $RUNTIME_ENV_FILE"
+    run_root install -d -m 0770 -o 1000 -g 1000 "$PERSISTENT_DATA_DIR"
 
     local current_port current_image current_sha candidate_port candidate_container project
     current_port="$(state_value CURRENT_PORT)"

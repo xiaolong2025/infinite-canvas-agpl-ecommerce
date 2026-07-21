@@ -37,7 +37,12 @@ function pluginHeaders(extra?: Record<string, string>, hasJsonBody = false): Rec
 }
 
 function pluginUrl(config: AiConfig, path: string) {
-    if (/^https?:/i.test(path)) return path;
+    const managedBase = config.baseUrl.trim().replace(/\/+$/, "");
+    if (/^https?:/i.test(path)) {
+        if (managedBase.startsWith("/api/ai/")) throw new Error("服务器托管渠道禁止直接访问外部接口");
+        return path;
+    }
+    if (managedBase.startsWith("/api/ai/") && (path === managedBase || path.startsWith(`${managedBase}/`))) return path;
     return buildApiUrl(config.baseUrl, path.startsWith("/") ? path : `/${path}`);
 }
 

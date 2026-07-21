@@ -1,4 +1,4 @@
-import { useEffect, useId, useMemo, useState } from "react";
+import { useEffect, useId, useMemo, useState, type MouseEvent, type PointerEvent } from "react";
 import { Cpu } from "lucide-react";
 
 import { Select, SelectContent, SelectItem, SelectTrigger } from "@/components/ui/select";
@@ -34,7 +34,7 @@ export function ModelPicker({ config, value, onChange, capability, className, fu
         <Select
             open={open}
             value={current}
-            onOpenChange={(nextOpen) => {
+            onOpenChange={(nextOpen: boolean) => {
                 if (nextOpen && !options.length && config.channelMode === "local") onMissingConfig?.();
                 if (nextOpen) window.dispatchEvent(new CustomEvent("model-picker-open", { detail: pickerId }));
                 setOpen(nextOpen);
@@ -48,8 +48,8 @@ export function ModelPicker({ config, value, onChange, capability, className, fu
                     "data-[state=open]:border-ring data-[state=open]:ring-2 data-[state=open]:ring-ring/20",
                     className,
                 )}
-                onMouseDown={(event) => event.stopPropagation()}
-                onPointerDown={(event) => event.stopPropagation()}
+                onMouseDown={(event: MouseEvent<HTMLButtonElement>) => event.stopPropagation()}
+                onPointerDown={(event: PointerEvent<HTMLButtonElement>) => event.stopPropagation()}
                 title={current ? modelOptionLabel(config, current) : placeholder}
             >
                 <ModelIcon model={current} />
@@ -62,8 +62,8 @@ export function ModelPicker({ config, value, onChange, capability, className, fu
                 align="start"
                 side="bottom"
                 sideOffset={6}
-                onPointerDown={(event) => event.stopPropagation()}
-                onMouseDown={(event) => event.stopPropagation()}
+                onPointerDown={(event: PointerEvent<HTMLDivElement>) => event.stopPropagation()}
+                onMouseDown={(event: MouseEvent<HTMLDivElement>) => event.stopPropagation()}
             >
                 {options.length ? (
                     options.map((model) => (

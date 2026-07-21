@@ -116,11 +116,14 @@ export const defaultWebdavSyncConfig: WebdavSyncConfig = {
 
 type ConfigStore = {
     config: AiConfig;
+    managed: boolean;
     webdav: WebdavSyncConfig;
     isConfigOpen: boolean;
     configTab: ConfigTabKey;
     shouldPromptContinue: boolean;
     updateConfig: <K extends keyof AiConfig>(key: K, value: AiConfig[K]) => void;
+    applyManagedChannels: (channels: ModelChannel[]) => void;
+    clearManagedConfig: () => void;
     updateWebdavConfig: <K extends keyof WebdavSyncConfig>(key: K, value: WebdavSyncConfig[K]) => void;
     isAiConfigReady: (config: AiConfig, model: string) => boolean;
     openConfigDialog: (shouldPromptContinue?: boolean, tab?: ConfigTabKey) => void;
@@ -177,17 +180,51 @@ export const useConfigStore = create<ConfigStore>()(
     persist(
         (set, get) => ({
             config: defaultConfig,
+            managed: false,
             webdav: defaultWebdavSyncConfig,
             isConfigOpen: false,
             configTab: "channels",
             shouldPromptContinue: false,
             updateConfig: (key, value) =>
-                set((state) => ({
+                set((state) => {
+                    if (state.managed && ["channels", "baseUrl", "apiKey", "apiFormat", "models"].includes(String(key))) return state;
+                    return { config: { ...state.config, [key]: value } };
+                }),
+            applyManagedChannels: (channels) =>
+                set((state) => {
+                    const normalizedChannels = channels.map((channel) => ({ ...channel, apiKey: "server-managed", baseUrl: channel.baseUrl.trim() }));
+                    const models = modelOptionsFromChannels(normalizedChannels);
+                    const pick = (current: string, capability?: ModelCapability) => {
+                        if (current && models.includes(current) && (!capability || modelCapabilityOf({ ...state.config, channels: normalizedChannels }, current) === capability)) return current;
+                        return selectableModelsByCapability({ ...state.config, channels: normalizedChannels }, capability)[0] || models[0] || "";
+                    };
+                    return {
+                        managed: true,
+                        config: {
+                            ...state.config,
+                            channelMode: "remote",
+                            baseUrl: normalizedChannels[0]?.baseUrl || "",
+                            apiKey: normalizedChannels[0]?.apiKey || "",
+                            apiFormat: normalizedChannels[0]?.apiFormat || "openai",
+                            channels: normalizedChannels,
+                            models,
+                            model: pick(state.config.model),
+                            imageModel: pick(state.config.imageModel, "image"),
+                            videoModel: pick(state.config.videoModel, "video"),
+                            textModel: pick(state.config.textModel, "text"),
+                            audioModel: pick(state.config.audioModel, "audio"),
+                        },
+                    };
+                }),
+            clearManagedConfig: () =>
+                set({
+                    managed: false,
                     config: {
-                        ...state.config,
-                        [key]: value,
+                        ...defaultConfig,
+                        apiKey: "",
+                        channels: defaultConfig.channels.map((channel) => ({ ...channel, apiKey: "" })),
                     },
-                })),
+                }),
             updateWebdavConfig: (key, value) =>
                 set((state) => ({
                     webdav: {
@@ -196,23 +233,39 @@ export const useConfigStore = create<ConfigStore>()(
                     },
                 })),
             isAiConfigReady: (config, model) => isAiConfigReady(config, model),
-            openConfigDialog: (shouldPromptContinue = false, configTab = "channels") => set({ isConfigOpen: true, shouldPromptContinue, configTab }),
+            openConfigDialog: (shouldPromptContinue = false, configTab = "channels") =>
+                set((state) => (state.managed ? { isConfigOpen: false } : { isConfigOpen: true, shouldPromptContinue, configTab })),
             setConfigDialogOpen: (isConfigOpen) => set({ isConfigOpen }),
             clearPromptContinue: () => set({ shouldPromptContinue: false }),
         }),
         {
             name: CONFIG_STORE_KEY,
-            partialize: (state) => ({ config: state.config, webdav: state.webdav }),
+            partialize: (state) => ({
+                config: {
+                    ...state.config,
+                    apiKey: "",
+                    channels: state.config.channels.map((channel) => ({ ...channel, apiKey: "" })),
+                },
+                webdav: state.webdav,
+            }),
             merge: (persisted, current) => {
                 const persistedState = (persisted || {}) as Partial<ConfigStore>;
                 const persistedConfig = (persistedState.config || {}) as Partial<AiConfig>;
                 const persistedWebdav = (persistedState.webdav || {}) as Partial<WebdavSyncConfig>;
-                const config = { ...defaultConfig, ...persistedConfig };
-                if (!Array.isArray(persistedConfig.channels)) config.channels = [];
+                const persistedChannels = Array.isArray(persistedConfig.channels)
+                    ? persistedConfig.channels.map((channel) => ({ ...channel, apiKey: "" }))
+                    : [];
+                const config: AiConfig = {
+                    ...defaultConfig,
+                    ...persistedConfig,
+                    apiKey: "",
+                    channels: persistedChannels,
+                };
                 const channels = normalizeChannels(config);
                 const models = modelOptionsFromChannels(channels);
                 return {
                     ...current,
+                    managed: false,
                     webdav: { ...defaultWebdavSyncConfig, ...persistedWebdav },
                     config: {
                         ...config,
@@ -242,7 +295,8 @@ export const useConfigStore = create<ConfigStore>()(
 
 export function useEffectiveConfig() {
     const config = useConfigStore((state) => state.config);
-    return useMemo(() => ({ ...config, channelMode: "local" as const }), [config]);
+    const managed = useConfigStore((state) => state.managed);
+    return useMemo(() => ({ ...config, channelMode: managed ? ("remote" as const) : ("local" as const) }), [config, managed]);
 }
 
 /** Normalize a mixed list of raw model names or model objects into deduped ChannelModel entries. */

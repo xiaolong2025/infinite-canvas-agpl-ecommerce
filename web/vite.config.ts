@@ -2,7 +2,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import react from "@vitejs/plugin-react";
-import { defineConfig, type Plugin, type ProxyOptions } from "vite";
+import { defineConfig, type Plugin } from "vite";
 
 import { parseChangelog } from "./src/lib/release";
 
@@ -10,21 +10,11 @@ const webDir = dirname(fileURLToPath(import.meta.url));
 const localVersion = readFileSync(resolve(webDir, "../VERSION"), "utf8").trim() || "dev";
 const localChangelog = readFileSync(resolve(webDir, "../CHANGELOG.md"), "utf8");
 const buildSha = process.env.BUILD_SHA || process.env.GITHUB_SHA || "dev";
-const createYigeAiProxy = (prefix: string): ProxyOptions => ({
-    target: "https://api.yigeai.work",
-    changeOrigin: true,
-    rewrite: (path) => path.replace(prefix, ""),
-    configure(proxy) {
-        proxy.on("proxyReq", (proxyReq) => {
-            proxyReq.removeHeader("origin");
-            proxyReq.removeHeader("referer");
-        });
+const appApiProxy = {
+    "/api": {
+        target: process.env.CANVAS_API_PROXY || "http://127.0.0.1:3001",
+        changeOrigin: true,
     },
-});
-const yigeAiProxy = {
-    "/api/yigeai": createYigeAiProxy("/api/yigeai"),
-    "/yigeai-api": createYigeAiProxy("/yigeai-api"),
-    "/yigeai-text-api": createYigeAiProxy("/yigeai-text-api"),
 };
 
 // 暴露 /plugins/index.json:列出 public/plugins 下的本地插件文件,
@@ -71,8 +61,8 @@ function buildMetadata(): Plugin {
 export default defineConfig({
     base: process.env.VITE_BASE || "/",
     plugins: [react(), localPluginsManifest(), buildMetadata()],
-    server: { proxy: yigeAiProxy },
-    preview: { proxy: yigeAiProxy },
+    server: { proxy: appApiProxy },
+    preview: { proxy: appApiProxy },
     resolve: {
         alias: {
             "@": resolve(webDir, "src"),

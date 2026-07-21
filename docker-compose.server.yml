@@ -8,6 +8,10 @@ services:
     environment:
       ANALYTICS_GA4_ID: ${ANALYTICS_GA4_ID:-}
       ANALYTICS_BAIDU_ID: ${ANALYTICS_BAIDU_ID:-}
+    env_file:
+      - ${CANVAS_RUNTIME_ENV_FILE:?CANVAS_RUNTIME_ENV_FILE is required}
+    volumes:
+      - ${CANVAS_DATA_DIR:?CANVAS_DATA_DIR is required}:/app/data
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:3000/healthz || exit 1"]
       interval: 10s

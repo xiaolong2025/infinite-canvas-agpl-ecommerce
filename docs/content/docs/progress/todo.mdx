@@ -6,6 +6,7 @@ description: 当前项目后续值得处理的事项
 # TODO
 
 本文档用来记录当前项目后续比较值得处理的事项。
+- 完成登录与托管 API 首次上线：在服务器创建权限受限的 `runtime.env` 和持久化数据目录，生成独立加密密钥与初始管理员密码，构建候选镜像后验证登录、管理员渠道、普通用户权限、SQLite 跨容器保留和失败回滚；未经确认不写入真实密钥或切换公网版本。
 
 - 完成首次开发版上线：用户确认自有 GitHub 仓库、`develop` 分支、GHCR 可见性、入口机、域名、证书、SSH Secrets 和只读 YigeAI 健康地址后，执行服务器预检、安装部署文件、构建两版镜像并验证切换与回滚。
 - 本地 Agent 接入后续：按[本地 Agent 接入规划](/docs/progress/local-agent-integration-plan)把 Claude Code CLI Adapter 升级为 Claude Agent SDK Adapter，并完善工具队列体验。

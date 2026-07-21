@@ -32,7 +32,7 @@
 ## 核心功能
 
 - 无限画布：多画布项目、节点拖拽缩放、连线、小地图、撤销重做、导入导出。
-- AI 创作：浏览器前台直连你配置的 OpenAI 兼容接口，支持文生图、图生图、参考图编辑、文本问答、音频和视频生成。
+- AI 创作：登录后通过服务器托管渠道调用 OpenAI 兼容或 Gemini 接口，支持文生图、图生图、参考图编辑、文本问答、音频和视频生成。
 - 画布助手：围绕选中节点和上游节点对话、生图，并把结果插回画布。
 - 本地 Agent：通过本机 Canvas Agent 连接 Codex / Claude Code，让 Agent 通过 MCP 操作当前画布；
 - Codex App 插件：提供 Codex app 插件，安装后会自动注册 MCP 并尝试拉起本地 Agent。
@@ -46,13 +46,19 @@
 
 ## 快速开始
 
-AI API Key、Base URL、画布、素材和生成记录默认保存在浏览器本地。
+API Key 和 Base URL 由管理员在服务器端配置并加密保存；画布、素材和生成记录仍保存在当前浏览器本地。
 
 ### 本地开发
 
 ```bash
 git clone git@github.com:basketikun/infinite-canvas.git
 cd infinite-canvas
+cd server
+bun install
+cp .env.example .env
+bun run dev
+
+# 另开一个终端
 cd web
 bun install
 bun run dev
@@ -68,7 +74,7 @@ docker compose up -d
 
 运行后默认端口3000，可访问 `http://localhost:3000`。
 
-首次打开后进入右上角配置，填入自己的 OpenAI 兼容 `Base URL` 和 `API Key`。
+首次启动前需要在服务端环境变量中设置加密密钥和初始管理员账号。登录后由管理员在“管理”页面新增渠道、模型和客户账号，普通用户不会看到 API Key。
 
 如果默认的OpenAI接口调用方式与您的API不同，可自定义生图/视频脚本调用。
 
